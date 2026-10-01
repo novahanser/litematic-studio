@@ -1,5 +1,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { buildFluidGeometry } from './fluid-geometry.js';
+import { attachCursorZoom } from './cursor-zoom.js';
+import { faceVertexUVs } from './model-uv.js';
 
 const DEG = Math.PI / 180;
 const FACE_NORMALS = { north: [0, 0, -1], south: [0, 0, 1], west: [-1, 0, 0], east: [1, 0, 0], up: [0, 1, 0], down: [0, -1, 0] };
@@ -15,8 +18,18 @@ function boundaryOf(points, normal) {
   return null;
 }
 
-function coversFace(cover, face) {
-  return cover.min.every((value, axis) => value <= face.min[axis] + 0.00001 && cover.max[axis] >= face.max[axis] - 0.00001);
+// Subtract a neighbour's coverage without discarding the exposed part of a
+// pane/ice face. Several multipart boxes may jointly cover one surface.
+export function subtractFaceRectangle(rect, cover) {
+  const lo = rect.min.map((v, i) => Math.max(v, cover.min[i]));
+  const hi = rect.max.map((v, i) => Math.min(v, cover.max[i]));
+  if (hi.some((v, i) => v - lo[i] < 0.00001)) return [rect];
+  return [
+    { min: [rect.min[0], rect.min[1]], max: [lo[0], rect.max[1]] },
+    { min: [hi[0], rect.min[1]], max: [rect.max[0], rect.max[1]] },
+    { min: [lo[0], rect.min[1]], max: [hi[0], lo[1]] },
+    { min: [lo[0], hi[1]], max: [hi[0], rect.max[1]] },
+  ].filter(piece => piece.max.every((v, i) => v - piece.min[i] > 0.00001));
 }
 
 function corners(direction, from, to) {
@@ -48,23 +61,6 @@ export function defaultFaceUV(direction, from, to) {
 function partRotation(part) {
   const x = new THREE.Matrix4().makeRotationX(-(part.x || 0) * DEG);
   return new THREE.Matrix4().makeRotationY(-(part.y || 0) * DEG).multiply(x);
-}
-
-function uvLockShift(direction, rotation) {
-  const normal = new THREE.Vector3(...FACE_NORMALS[direction]).transformDirection(rotation);
-  let target = direction, best = -Infinity;
-  for (const [name, n] of Object.entries(FACE_NORMALS)) {
-    const dot = normal.dot(new THREE.Vector3(...n));
-    if (dot > best) { target = name; best = dot; }
-  }
-  const source = new THREE.Vector3(...corners(direction, [0, 0, 0], [1, 1, 1])[0]).subScalar(0.5).applyMatrix4(rotation);
-  const dest = corners(target, [0, 0, 0], [1, 1, 1]);
-  let nearest = 0, distance = Infinity;
-  dest.forEach((p, i) => {
-    const d = source.distanceToSquared(new THREE.Vector3(...p).subScalar(0.5));
-    if (d < distance) { nearest = i; distance = d; }
-  });
-  return nearest;
 }
 
 function tintFor(block, face, asset) {
@@ -118,8 +114,7 @@ export function buildStateGeometry(asset, block, atlas) {
         });
         const normal = new THREE.Vector3().subVectors(points[1], points[0]).cross(new THREE.Vector3().subVectors(points[2], points[0])).normalize();
         const uv = face.uv || defaultFaceUV(direction, from, to);
-        const sourceUVs = [[uv[0], uv[1]], [uv[0], uv[3]], [uv[2], uv[3]], [uv[2], uv[1]]];
-        const shift = ((Math.round((face.rotation || 0) / 90) + (part.uvlock ? uvLockShift(direction, blockRotation) : 0)) % 4 + 4) % 4;
+        const sourceUVs = faceVertexUVs(direction, uv, face.rotation || 0, part);
         const region = atlas.regions[face.texture] || atlas.regions.__missing__ || atlas.regions[fallbackTexture];
         const tint = tintFor(block, face, asset);
         const start = positions.length / 3;
@@ -132,7 +127,7 @@ export function buildStateGeometry(asset, block, atlas) {
           positions.push(points[i].x, points[i].y, points[i].z);
           normals.push(normal.x, normal.y, normal.z);
           colors.push(tint.r, tint.g, tint.b);
-          const [u, v] = sourceUVs[(i + shift) % 4];
+          const [u, v] = sourceUVs[i];
           // A small inset keeps nearest-neighbour sampling inside this atlas tile.
           const px = region.x + 0.02 + (u / 16) * (region.width - 0.04);
           const py = region.y + 0.02 + (v / 16) * (region.height - 0.04);
@@ -149,6 +144,8 @@ export function buildStateGeometry(asset, block, atlas) {
   geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
   geometry.setIndex(indices);
   geometry.userData.quads = quads;
+  geometry.userData.hasTranslucentTexture = parts.some(part => (part.elements || []).some(element =>
+    Object.values(element.faces || {}).some(face => atlas.regions[face.texture]?.translucent)));
   geometry.computeBoundingBox();
   geometry.computeBoundingSphere();
   return geometry;
@@ -202,7 +199,11 @@ async function createAtlas(assets, limit) {
     }
     const pixels = ctx.getImageData(r.x, r.y, r.width, r.height).data;
     r.opaque = true;
-    for (let i = 3; i < pixels.length; i += 4) if (pixels[i] < 255) { r.opaque = false; break; }
+    r.translucent = false;
+    for (let i = 3; i < pixels.length; i += 4) {
+      if (pixels[i] < 255) r.opaque = false;
+      if (pixels[i] > 0 && pixels[i] < 255) r.translucent = true;
+    }
     // Duplicate edge texels into gutters to avoid dark seams at oblique angles.
     ctx.drawImage(canvas, r.x, r.y, r.width, 1, r.x, r.y - 1, r.width, 1);
     ctx.drawImage(canvas, r.x, r.y + r.height - 1, r.width, 1, r.x, r.y + r.height, r.width, 1);
@@ -218,8 +219,8 @@ async function createAtlas(assets, limit) {
   return { texture, regions, width: size, height: size };
 }
 
-export function transparentState(block, asset) {
-  return !!asset?.transparent || /(?:stained_glass|:glass(?:_pane)?$|:water$|:ice$|:frosted_ice$|:slime_block$|:honey_block$)/.test(block?.Name || '');
+export function transparentState(block, asset, geometry) {
+  return !!asset?.transparent || !!geometry?.userData.hasTranslucentTexture || /(?:stained_glass|:glass(?:_pane)?$|:water$|:ice$|:frosted_ice$|:slime_block$|:honey_block$)/.test(block?.Name || '');
 }
 
 function transparencyFamily(block) {
@@ -229,7 +230,7 @@ function transparencyFamily(block) {
 
 /** Merge transparent quads into one sortable batch, eliminating shared surfaces.
  * Visibility is an input: hiding a layer exposes its neighbours' cut faces again. */
-export function buildTransparentGeometry(schematic, visibleIndices, stateGeometries, assets) {
+export function buildTransparentGeometry(schematic, visibleIndices, stateGeometries, assets, { excludeWater = false } = {}) {
   const positions = [], normals = [], uvs = [], colors = [], indices = [], blockIndices = [], centers = [];
   const occupied = new Map();
   for (const index of visibleIndices) {
@@ -252,36 +253,59 @@ export function buildTransparentGeometry(schematic, visibleIndices, stateGeometr
   }
   for (const index of visibleIndices) {
     const block = schematic.blocks[index], state = schematic.palette[block.state], asset = assets.blocks?.[block.state];
-    if (!transparentState(state, asset)) continue;
     const source = stateGeometries.get(block.state);
-    if (!source) continue;
+    if (!source || !transparentState(state, asset, source) || excludeWater && /:(water|bubble_column)$/.test(state.Name)) continue;
     const scale = fluidScale(block);
     for (let faceIndex = 0; faceIndex < source.userData.quads.length; faceIndex++) {
       const face = surface(source.userData.quads[faceIndex], scale);
+      let rectangles = [{ min: face.min, max: face.max }];
       if (face.boundary) {
         const offset = FACE_NORMALS[face.boundary];
         const neighbor = occupied.get(`${block.x + offset[0]},${block.y + offset[1]},${block.z + offset[2]}`);
         if (neighbor) {
           const neighborState = schematic.palette[neighbor.state], neighborGeometry = stateGeometries.get(neighbor.state);
-          const sameMedium = transparentState(neighborState, assets.blocks?.[neighbor.state]) && transparencyFamily(state) === transparencyFamily(neighborState);
+          const sameMedium = transparentState(neighborState, assets.blocks?.[neighbor.state], neighborGeometry) && transparencyFamily(state) === transparencyFamily(neighborState);
           const neighborScale = fluidScale(neighbor);
-          const hidden = neighborGeometry?.userData.quads.some(base => { const other = surface(base, neighborScale); return other.boundary === OPPOSITE[face.boundary] && (sameMedium || other.opaque) && coversFace(other, face); });
-          if (hidden) continue;
+          for (const base of neighborGeometry?.userData.quads || []) {
+            const other = surface(base, neighborScale);
+            if (other.boundary === OPPOSITE[face.boundary] && (sameMedium || other.opaque)) rectangles = rectangles.flatMap(rect => subtractFaceRectangle(rect, other));
+            if (!rectangles.length) break;
+          }
         }
       }
+      if (!rectangles.length) continue;
+      const clipped = rectangles.length !== 1 || rectangles[0].min.some((v,i) => v !== face.min[i]) || rectangles[0].max.some((v,i) => v !== face.max[i]);
+      const localPoints = clipped && Array.from({ length: 4 }, (_, vertex) => {
+        const at = faceIndex * 4 + vertex;
+        return new THREE.Vector3(source.attributes.position.getX(at), source.attributes.position.getY(at) * scale, source.attributes.position.getZ(at));
+      });
+      const edgeU = clipped && localPoints[3].clone().sub(localPoints[0]), edgeV = clipped && localPoints[1].clone().sub(localPoints[0]);
+      for (const rectangle of rectangles) {
       const start = positions.length / 3;
       let cx = 0, cy = 0, cz = 0;
       for (let vertex = 0; vertex < 4; vertex++) {
         const at = faceIndex * 4 + vertex;
-        const x = source.attributes.position.getX(at) + block.x, y = source.attributes.position.getY(at) * scale + block.y, z = source.attributes.position.getZ(at) + block.z;
+        const point = clipped && localPoints[vertex].clone();
+        if (clipped) face.planarAxes.forEach((axis, i) => point.setComponent(axis,
+          Math.abs(point.getComponent(axis) - face.min[i]) < 0.00001 ? rectangle.min[i] : rectangle.max[i]));
+        const x = (clipped ? point.x : source.attributes.position.getX(at)) + block.x,
+          y = (clipped ? point.y : source.attributes.position.getY(at) * scale) + block.y,
+          z = (clipped ? point.z : source.attributes.position.getZ(at)) + block.z;
         positions.push(x, y, z); cx += x; cy += y; cz += z;
         normals.push(source.attributes.normal.getX(at), source.attributes.normal.getY(at), source.attributes.normal.getZ(at));
-        uvs.push(source.attributes.uv.getX(at), source.attributes.uv.getY(at));
+        if (clipped) {
+        const delta = point.clone().sub(localPoints[0]);
+        const u = edgeU.lengthSq() ? delta.dot(edgeU) / edgeU.lengthSq() : 0, v = edgeV.lengthSq() ? delta.dot(edgeV) / edgeV.lengthSq() : 0;
+        const uv = source.attributes.uv, first = faceIndex * 4;
+        uvs.push(uv.getX(first) + (uv.getX(first + 3) - uv.getX(first)) * u + (uv.getX(first + 1) - uv.getX(first)) * v,
+          uv.getY(first) + (uv.getY(first + 3) - uv.getY(first)) * u + (uv.getY(first + 1) - uv.getY(first)) * v);
+        } else uvs.push(source.attributes.uv.getX(at), source.attributes.uv.getY(at));
         colors.push(source.attributes.color.getX(at), source.attributes.color.getY(at), source.attributes.color.getZ(at));
       }
       indices.push(start, start + 1, start + 2, start, start + 2, start + 3);
       centers.push(cx / 4, cy / 4, cz / 4);
       blockIndices.push(index);
+      }
     }
   }
   const geometry = new THREE.BufferGeometry();
@@ -316,6 +340,28 @@ export function sortTransparentFaces(geometry, camera) {
   geometry.index.needsUpdate = true;
 }
 
+// Water in partial blocks and glass must be in the SAME sortable draw call;
+// sorting separate materials would bring the original see-through bug back.
+export function mergeTransparentGeometries(parts) {
+  const geometry = new THREE.BufferGeometry();
+  for (const [name, itemSize] of [['position',3],['normal',3],['uv',2],['color',3]]) {
+    const array = new Float32Array(parts.reduce((n,p)=>n+p.attributes[name].array.length,0));
+    let offset = 0;
+    for (const part of parts) { array.set(part.attributes[name].array,offset); offset += part.attributes[name].array.length; }
+    geometry.setAttribute(name,new THREE.BufferAttribute(array,itemSize));
+  }
+  const blockIndices = parts.flatMap(part=>part.userData.blockIndices);
+  const centers = new Float32Array(blockIndices.length*3);
+  let offset = 0;
+  for(const part of parts) { centers.set(part.userData.centers,offset); offset += part.userData.centers.length; }
+  const indices = new Uint32Array(blockIndices.length*6);
+  for(let face=0;face<blockIndices.length;face++) { const i=face*4; indices.set([i,i+1,i+2,i,i+2,i+3],face*6); }
+  geometry.setIndex(new THREE.BufferAttribute(indices,1));
+  geometry.userData = { blockIndices, centers, faceOrder:Array.from({length:blockIndices.length},(_,i)=>i), depths:new Float32Array(blockIndices.length) };
+  geometry.computeBoundingBox(); geometry.computeBoundingSphere();
+  return geometry;
+}
+
 export class SchematicViewer {
   constructor(host, { onSelect, onHover, onStats, onSelectEntity, onProjectionChange } = {}) {
     this.host = host;
@@ -341,7 +387,7 @@ export class SchematicViewer {
     this.renderer.setClearColor('#101722');
     this.renderer.domElement.style.cssText = 'display:block;width:100%;height:100%;outline:none;touch-action:none';
     this.renderer.domElement.tabIndex = 0;
-    this.renderer.domElement.setAttribute('aria-label', '三维投影：中键旋转，Shift+中键平移，Ctrl+中键缩放，滚轮缩放，左键选中，小键盘切换视角');
+    this.renderer.domElement.setAttribute('aria-label', '三维投影：中键旋转，Shift+中键平移，Ctrl+中键缩放，滚轮朝鼠标指向位置缩放，左键选中，小键盘切换视角');
     host.appendChild(this.renderer.domElement);
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
@@ -399,6 +445,8 @@ export class SchematicViewer {
       keydown: event => this.handleKey(event),
     };
     Object.entries(this.handlers).forEach(([name, handler]) => canvas.addEventListener(name, handler, name === 'pointerdown'));
+    this.cursorZoom = attachCursorZoom({ element: canvas, getCamera: () => this.camera, controls: this.controls,
+      pick: event => this.pickTarget(event), beforeZoom: () => this.stopInertia(), invalidate: () => this.invalidate() });
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(host);
     this.resize();
@@ -456,7 +504,7 @@ export class SchematicViewer {
     for (const [state, count] of counts) {
       const block = schematic.palette[state], asset = assets.blocks?.[state];
       const geometry = buildStateGeometry(asset, block, atlas);
-      const transparent = transparentState(block, asset);
+      const transparent = transparentState(block, asset, geometry);
       this.stateGeometries.set(state, geometry);
       if (transparent) continue;
       const material = new THREE.MeshLambertMaterial({ map: atlas.texture, vertexColors: true, alphaTest: 0.08, depthWrite: true, side: THREE.DoubleSide });
@@ -510,7 +558,15 @@ export class SchematicViewer {
       this.blockGroup.remove(this.transparentMesh);
       this.meshes = this.meshes.filter(mesh => mesh !== this.transparentMesh);
     }
-    const geometry = buildTransparentGeometry(this.schematic, this.visibleIndices, this.stateGeometries, this.assets);
+    const hasWater = !!this.assets.fluids?.water;
+    let geometry = buildTransparentGeometry(this.schematic, this.visibleIndices, this.stateGeometries, this.assets, {excludeWater:hasWater});
+    if(hasWater) {
+      const water = buildFluidGeometry(this.schematic,this.visibleIndices,this.assets,this.atlas);
+      const base = geometry;
+      geometry = mergeTransparentGeometries([base,water]);
+      geometry.userData.waterFaces = water.index.count / 6;
+      base.dispose(); water.dispose();
+    }
     const material = new THREE.MeshLambertMaterial({ map: this.atlas.texture, vertexColors: true, alphaTest: 0.001, transparent: true, depthWrite: false, side: THREE.FrontSide });
     const mesh = new THREE.Mesh(geometry, material);
     mesh.visible = geometry.index.count > 0;
@@ -714,14 +770,14 @@ export class SchematicViewer {
   }
 
   getStats() {
-    return { visible: this.visibleIndices.length, total: this.schematic?.blocks.length || 0, meshes: this.meshes.filter(m => m.visible).length, triangles: this.meshes.reduce((n, m) => n + (m.isInstancedMesh ? m.count : 1) * (m.geometry.index?.count || 0) / 3, 0), transparentFaces: this.transparentMesh?.geometry.userData.faceOrder.length || 0, atlasSize: this.atlas?.width || 0 };
+    return { visible: this.visibleIndices.length, total: this.schematic?.blocks.length || 0, meshes: this.meshes.filter(m => m.visible).length, triangles: this.meshes.reduce((n, m) => n + (m.isInstancedMesh ? m.count : 1) * (m.geometry.index?.count || 0) / 3, 0), transparentFaces: this.transparentMesh?.geometry.userData.faceOrder.length || 0, waterFaces: this.transparentMesh?.geometry.userData.waterFaces || 0, atlasSize: this.atlas?.width || 0 };
   }
 
   dispose() {
     if (this.disposed) return;
     this.disposed = true; this.generation++;
     if (this.pending) cancelAnimationFrame(this.pending);
-    this.resizeObserver.disconnect(); this.controls.dispose();
+    this.resizeObserver.disconnect(); this.cursorZoom?.dispose(); this.controls.dispose();
     Object.entries(this.handlers).forEach(([name, handler]) => this.renderer.domElement.removeEventListener(name, handler, name === 'pointerdown'));
     this.setEntityLayer(null);
     this.clearMeshes();

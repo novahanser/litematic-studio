@@ -199,6 +199,21 @@ function box(from, to, texture, uv) {
   return { from, to, faces };
 }
 
+// Entity cuboid UV net after the renderer's (1,-1,-1) model-axis conversion.
+// UVs use the vanilla reference sheet size, so higher resolution packs scale
+// correctly. The front of this canonical upright model is SOUTH, not NORTH.
+function entityUv(u, v, width, height, depth, sheetWidth = 64, sheetHeight = 64) {
+  const rects = {
+    up: [u + depth, v, u + depth + width, v + depth],
+    down: [u + depth + width, v + depth, u + depth + width * 2, v],
+    north: [u + depth * 2 + width, v + depth, u + depth * 2 + width * 2, v + depth + height],
+    south: [u + depth, v + depth, u + depth + width, v + depth + height],
+    west: [u, v + depth, u + depth, v + depth + height],
+    east: [u + depth + width, v + depth, u + depth * 2 + width, v + depth + height],
+  };
+  return Object.fromEntries(Object.entries(rects).map(([face, uv]) => [face, uv.map((n, i) => n * 16 / (i % 2 ? sheetHeight : sheetWidth))]));
+}
+
 function crc32(buffer) {
   let crc = 0xffffffff;
   for (const byte of buffer) {
@@ -241,6 +256,7 @@ function loadAssets(jarPath, palette, options = {}) {
   const metadata = readJson(base.read('version.json'), 'version.json') || {};
   const textures = Object.create(null);
   const textureMeta = Object.create(null);
+  const fluids = Object.create(null);
   function texture(id) {
     try { id = resourceId(id); } catch { id = MISSING; }
     if (textures[id]) return id;
@@ -273,6 +289,11 @@ function loadAssets(jarPath, palette, options = {}) {
       textureMeta[MISSING] = { width: 2, height: 2, frameWidth: 2, frameHeight: 2, animated: false, firstFrame: 0 };
     }
     return MISSING;
+  }
+  function ensureWaterResources() {
+    if (!fluids.water) fluids.water = { still: texture('minecraft:block/water_still'),
+      flow: texture('minecraft:block/water_flow'), tint: 0x3f76e4 };
+    return fluids.water;
   }
   const modelCache = new Map();
   function model(id, trail = []) {
@@ -339,43 +360,73 @@ function loadAssets(jarPath, palette, options = {}) {
       const lidUv = { up: scale([14, 0, 28, 14]), down: scale([28, 0, 42, 14]), north: scale([14, 14, 28, 19]),
         south: scale([42, 14, 56, 19]), west: scale([0, 14, 14, 19]), east: scale([28, 14, 42, 19]) };
       const lockUv = Object.fromEntries(DIRECTIONS.map(direction => [direction, scale([1, 1, 3, 5])]));
-      return { parts: [{ x: 0, y: facingY, uvlock: false, elements: [box([1, 0, 1], [15, 10, 15], tex, bodyUv),
-        box([1, 10, 1], [15, 14, 15], tex, lidUv), box([7, 8, 0], [9, 12, 1], tex, lockUv)] }], reason: '箱子使用本地实体材质与静态近似模型；双箱连接和开盖动画未模拟' };
+      // The closed lid spans y=9..14 and its latch y=7..11. The body is
+      // cropped to the exposed nine pixels to avoid coplanar overlapping walls.
+      for (const face of ['north', 'south', 'west', 'east']) bodyUv[face][1] += 1 / 4;
+      const body = box([1, 0, 1], [15, 9, 15], tex, bodyUv), lid = box([1, 9, 1], [15, 14, 15], tex, lidUv);
+      delete body.faces.up; delete lid.faces.down;
+      return { parts: [{ x: 0, y: facingY, uvlock: false, elements: [body,
+        lid, box([7, 7, 0], [9, 11, 1], tex, lockUv)] }], reason: '箱子使用本地实体材质与静态近似模型；双箱连接和开盖动画未模拟' };
     }
     if (localName.endsWith('shulker_box')) {
       const color = localName === 'shulker_box' ? '' : `_${localName.slice(0, -12)}`;
       const tex = texture(`minecraft:entity/shulker/shulker${color}`);
-      const scale = rect => rect.map(n => n / 4);
-      const uv = { up: scale([16, 0, 32, 16]), down: scale([32, 28, 48, 44]),
-        north: scale([16, 16, 32, 32]), south: scale([48, 16, 64, 32]), west: scale([0, 16, 16, 32]), east: scale([32, 16, 48, 32]) };
-      return { parts: [{ x: properties.facing === 'down' ? 180 : (properties.facing === 'up' || !properties.facing ? 0 : 90),
-        y: facingY, uvlock: false, elements: [box([0, 0, 0], [16, 16, 16], tex, uv)] }], reason: '潜影盒使用本地实体材质与静态近似模型；未模拟开盖' };
+      // Closed vanilla lid is 12 pixels high; only the bottom four pixels of
+      // the 8-pixel base remain exposed. A single full-height UV stretches the
+      // lid into blank portions of the entity sheet.
+      const lid = box([0, 4, 0], [16, 16, 16], tex, entityUv(0, 0, 16, 12, 16));
+      const baseUv = entityUv(0, 28, 16, 8, 16);
+      for (const face of ['north', 'south', 'west', 'east']) baseUv[face][1] = 48 / 4;
+      const bottom = box([0, 0, 0], [16, 4, 16], tex, baseUv);
+      delete lid.faces.down; delete bottom.faces.up;
+      const horizontal = ['north', 'east', 'south', 'west'].includes(properties.facing);
+      // Matches Direction.getRotation() in the local Java client, including
+      // roll around the opening axis (checking the opening normal alone misses it).
+      return { parts: [{ x: properties.facing === 'down' ? 180 : horizontal ? 270 : 0,
+        y: horizontal ? (facingY + 180) % 360 : 0, uvlock: false, elements: [lid, bottom] }], reason: '潜影盒使用本地实体材质与闭合静态模型；未模拟开盖' };
     }
     if (localName.endsWith('_bed')) {
       const color = localName.slice(0, -4);
       let texId = `minecraft:entity/bed/${color}`;
       if (!existsTexture(texId)) texId = `minecraft:block/${color}_wool`;
       const tex = texture(texId);
-      const element = box([0, 3, 0], [16, 9, 16], tex);
-      return { parts: [{ x: 0, y: facingY, uvlock: false, elements: [element] }], reason: '床使用本地材质与静态近似模型' };
+      const head = properties.part === 'head', offset = head ? 0 : 22;
+      const scale = rect => rect.map(n => n / 4);
+      const uv = texId.includes(':entity/') ? {
+        up: scale([6, offset + 6, 22, offset + 22]), down: scale([44, offset + 22, 28, offset + 6]),
+        north: scale([22, offset + 6, 6, offset]), south: scale([22, offset + 6, 38, offset]),
+        west: scale([0, offset + 6, 6, offset + 22]), east: scale([22, offset + 6, 28, offset + 22]),
+      } : null;
+      const element = box([0, 3, 0], [16, 9, 16], tex, uv);
+      if (uv) { element.faces.east.rotation = 90; element.faces.west.rotation = 270; }
+      const legZ = head ? 0 : 13;
+      const legs = [0, 13].map((x, i) => box([x, 0, legZ], [x + 3, 3, legZ + 3], tex,
+        uv ? entityUv(50, (head ? 6 : 0) + i * 12, 3, 3, 3) : null));
+      return { parts: [{ x: 0, y: facingY, uvlock: false, elements: [element, ...legs] }], reason: '床使用本地实体材质与静态模型；按床头/床尾及朝向分别显示' };
     }
     if (localName.endsWith('_sign')) {
       const wall = localName.includes('_wall_');
       const hanging = localName.includes('_hanging_');
       const wood = localName.replace(/_(wall_)?(hanging_)?sign$/, '');
-      let tex = texture(`minecraft:entity/signs/${wood}`);
-      const signUv = Object.fromEntries(Object.entries({ up: [2, 0, 26, 2], down: [26, 0, 50, 2],
-        north: [2, 2, 26, 14], south: [28, 2, 52, 14], west: [0, 2, 2, 14], east: [26, 2, 28, 14] })
-        .map(([direction, uv]) => [direction, [uv[0] / 4, uv[1] / 2, uv[2] / 4, uv[3] / 2]]));
-      const elements = [box([0, wall ? 4 : 8, wall ? 14 : 7], [16, wall ? 12 : 16, wall ? 16 : 9], tex, signUv)];
-      if (!wall && !hanging) elements.push(box([7, 0, 7], [9, 8, 9], texture(`minecraft:block/${wood}_planks`)));
+      const tex = texture(`minecraft:entity/signs/${hanging ? 'hanging/' : ''}${wood}`);
+      const signUv = entityUv(0, 0, 24, 12, 2, 64, 32);
+      const elements = [box([0, wall ? 13 / 3 : 28 / 3, wall ? 1 / 3 : 22 / 3],
+        [16, wall ? 37 / 3 : 52 / 3, wall ? 5 / 3 : 26 / 3], tex, signUv)];
+      if (!wall && !hanging) elements.push(box([22 / 3, 0, 22 / 3], [26 / 3, 28 / 3, 26 / 3], tex, entityUv(0, 14, 2, 14, 2, 64, 32)));
       if (hanging) {
-        tex = texture(`minecraft:block/${wood}_planks`);
-        elements.splice(0, elements.length, box([1, 1, 7], [15, 12, 9], tex),
-          box([3, 12, 7], [4, 16, 9], tex), box([12, 12, 7], [13, 16, 9], tex));
+        elements.splice(0, elements.length, box([1, 0, 7], [15, 10, 9], tex, entityUv(0, 12, 14, 10, 2, 64, 32)));
+        if (wall) elements.push(box([0, 14, 6], [16, 16, 10], tex, entityUv(0, 0, 16, 2, 4, 64, 32)));
+        function chain(from, to, u, width, rotation) {
+          const uv = [u / 4, 3, (u + width) / 4, 6];
+          const element = { from, to, faces: { north: { texture: tex, uv }, south: { texture: tex, uv } } };
+          if (rotation) element.rotation = { origin: [(from[0] + to[0]) / 2, 13, 8], axis: 'y', angle: rotation, rescale: false };
+          elements.push(element);
+        }
+        if (!wall && properties.attached === 'true') chain([2, 10, 8], [14, 16, 8], 14, 12, 0);
+        else for (const x of [3, 13]) { chain([x - 1.5, 10, 8], [x + 1.5, 16, 8], 0, 3, 45); chain([x - 1.5, 10, 8], [x + 1.5, 16, 8], 6, 3, -45); }
       }
-      return { parts: [{ x: 0, y: wall ? facingY : (Number(properties.rotation) || 0) * 22.5, uvlock: false, elements }],
-        reason: '告示牌使用本地木材与静态近似模型；文字仍可在 NBT 面板中查看' };
+      return { parts: [{ x: 0, y: wall ? (facingY + 180) % 360 : (Number(properties.rotation) || 0) * 22.5, uvlock: false, elements }],
+        reason: '告示牌使用本地实体材质与静态模型；文字仍可在 NBT 面板中查看' };
     }
     if (localName.endsWith('_banner')) {
       const wall = localName.includes('_wall_');
@@ -432,10 +483,18 @@ function loadAssets(jarPath, palette, options = {}) {
     const translationKey = `block.${name.replace(':', '.').replace(/\//g, '.')}`;
     const result = { name, properties, label: lang[translationKey] || lang[translationKey.replace(/^block\./, 'item.')] || name, parts: [] };
     if (AIR.has(name)) return result;
+    if (properties.waterlogged === 'true') {
+      result.waterlogged = true; ensureWaterResources();
+      // Their JSON model is a full cube, but cutout texels represent holes.
+      // Fluid meshing must keep the water behind the cutout shell instead of
+      // subtracting the entire cube as if it were stone.
+      if (/^minecraft:.*(?:_leaves|copper_grate)$/.test(name) || name === 'minecraft:mangrove_roots') result.fluidPorous = true;
+    }
     if (name === 'minecraft:water' || name === 'minecraft:lava' || name === 'minecraft:bubble_column') {
       const liquid = name === 'minecraft:lava' ? 'lava' : 'water'; const level = Number(properties.level || 0);
       const height = name === 'minecraft:bubble_column' || level >= 8 ? 16 : Math.max(2, (8 - level) * 16 / 9);
       const still = texture(`minecraft:block/${liquid}_still`); const flow = texture(`minecraft:block/${liquid}_flow`);
+      if (liquid === 'water') ensureWaterResources();
       const element = box([0, 0, 0], [16, height, 16], still);
       for (const direction of ['north', 'south', 'west', 'east']) element.faces[direction].texture = flow;
       if (liquid === 'water') for (const face of Object.values(element.faces)) face.tintindex = 0;
@@ -473,7 +532,7 @@ function loadAssets(jarPath, palette, options = {}) {
     warn(`${name}: ${approximation.reason}`);
     return result;
   });
-  return { blocks, textures, textureMeta, lang, source: { path: path.resolve(jarPath), version: metadata.id || path.basename(jarPath, '.jar'),
+  return { blocks, textures, textureMeta, fluids, lang, source: { path: path.resolve(jarPath), version: metadata.id || path.basename(jarPath, '.jar'),
     gameDirectory: gameRoot, resourcePackPath: options.resourcePackPath ? path.resolve(options.resourcePackPath) : null }, warnings: [...warnings] };
 }
 

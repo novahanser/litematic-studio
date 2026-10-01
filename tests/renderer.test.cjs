@@ -135,6 +135,42 @@ test('different transparent materials retain their interface instead of erasing 
   geometry.dispose(); fixture.source.forEach(source => source.dispose());
 });
 
+test('partial opaque coverage clips only the hidden area and interpolates the original UVs', async () => {
+  const [{ buildStateGeometry, buildTransparentGeometry }] = await imports;
+  const palette = [{ Name: 'minecraft:glass' }, stone];
+  const assets = { blocks: [{ parts: [{ elements: [cube()] }] }, { parts: [{ elements: [{ ...cube(), to: [16, 8, 16] }] }] }] };
+  const source = new Map(palette.map((s,i) => [i, buildStateGeometry(assets.blocks[i], s, { ...atlas, regions: { stone: { ...atlas.regions.stone, opaque: i === 1 } } })]));
+  const schematic = { palette, blocks: [{ x:0,y:0,z:0,state:0 }, { x:1,y:0,z:0,state:1 }] };
+  const result = buildTransparentGeometry(schematic, [0,1], source, assets);
+  const east = [];
+  for(let i=0;i<result.attributes.position.count;i++) if(result.attributes.normal.getX(i) > .99) east.push(i);
+  assert.equal(east.length, 4);
+  assert.deepEqual([...new Set(east.map(i=>result.attributes.position.getY(i)))].sort(), [.5,1]);
+  const original = source.get(0).attributes.uv;
+  const originalVSpan = Math.abs(original.getY(12) - original.getY(13));
+  close(Math.max(...east.map(i=>result.attributes.uv.getY(i))) - Math.min(...east.map(i=>result.attributes.uv.getY(i))), originalVSpan / 2);
+  result.dispose(); source.forEach(g=>g.dispose());
+});
+
+test('two neighbour model pieces jointly occlude a complete glass surface', async () => {
+  const [{ buildStateGeometry, buildTransparentGeometry }] = await imports;
+  const palette = [{ Name:'minecraft:glass' }, stone];
+  const assets = { blocks: [{ parts:[{ elements:[cube()] }] }, { parts:[{ elements:[{ ...cube(), to:[16,8,16] }, { ...cube(), from:[0,8,0] }] }] }] };
+  const source = new Map(palette.map((s,i)=>[i,buildStateGeometry(assets.blocks[i],s,{...atlas,regions:{stone:{...atlas.regions.stone,opaque:i===1}}})]));
+  const result = buildTransparentGeometry({palette,blocks:[{x:0,y:0,z:0,state:0},{x:1,y:0,z:0,state:1}]},[0,1],source,assets);
+  assert.equal(result.index.count / 6, 5);
+  result.dispose(); source.forEach(g=>g.dispose());
+});
+
+test('resource-pack fractional alpha enables blending for any block, while cutout alpha stays opaque', async () => {
+  const [{ buildStateGeometry, transparentState }] = await imports;
+  for(const translucent of [true,false]) {
+    const geometry = buildStateGeometry({parts:[{elements:[cube()]}]},stone,{...atlas,regions:{stone:{...atlas.regions.stone,opaque:false,translucent}}});
+    assert.equal(transparentState(stone,{},geometry),translucent);
+    geometry.dispose();
+  }
+});
+
 test('stacked water fills the vertical seam and removes the internal fluid surface', async () => {
   const fixture = await transparentFixture(['minecraft:water'], [{ x: 0, y: 0, z: 0, state: 0 }, { x: 0, y: 1, z: 0, state: 0 }], { element: { ...cube(), to: [16, 128 / 9, 16] } });
   fixture.assets.blocks[0].fluid = true;
@@ -166,6 +202,23 @@ test('transparent faces sort globally across states and raycast identity follows
   assert.equal(geometry.userData.blockIndices[geometry.userData.faceOrder[0]], 0);
   assert.equal(viewer.pick({ clientX: 50, clientY: 50 }), 1);
   geometry.dispose(); mesh.material.dispose(); fixture.source.forEach(source => source.dispose());
+});
+
+test('merged glass and fluid batches retain their block identities after global sorting', async () => {
+  const [{ mergeTransparentGeometries, sortTransparentFaces, SchematicViewer }, THREE] = await imports;
+  const fixture=await transparentFixture(['minecraft:glass'],[{x:0,y:0,z:0,state:0},{x:0,y:0,z:3,state:0}]);
+  const near=fixture.build([0]),far=fixture.build([1]),merged=mergeTransparentGeometries([near,far]);
+  assert.equal(merged.index.count,near.index.count+far.index.count);
+  assert.deepEqual(merged.userData.blockIndices,[...near.userData.blockIndices,...far.userData.blockIndices]);
+  const camera=new THREE.PerspectiveCamera(45,1,.1,100);camera.position.set(.5,.5,-3);camera.lookAt(.5,.5,1);
+  sortTransparentFaces(merged,camera);
+  const mesh=new THREE.Mesh(merged,new THREE.MeshBasicMaterial({side:THREE.FrontSide}));mesh.updateMatrixWorld(true);
+  const viewer=Object.create(SchematicViewer.prototype);
+  Object.assign(viewer,{schematic:fixture.schematic,meshes:[mesh],camera,pointer:new THREE.Vector2(),raycaster:new THREE.Raycaster(),renderer:{domElement:{getBoundingClientRect:()=>({left:0,top:0,width:100,height:100})}}});
+  assert.equal(viewer.pick({clientX:50,clientY:50}),0);
+  camera.position.z=8;camera.lookAt(.5,.5,1);sortTransparentFaces(merged,camera);
+  assert.equal(viewer.pick({clientX:50,clientY:50}),1);
+  [near,far,merged,...fixture.source.values()].forEach(g=>g.dispose());mesh.material.dispose();
 });
 
 test('projection switching preserves framing and orthographic fit, zoom and focus remain finite', async () => {
