@@ -1,0 +1,10 @@
+const esbuild = require('esbuild');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+fs.mkdirSync(path.join(root, 'build'), {recursive:true});
+fs.mkdirSync(path.join(root, 'build/licenses'), {recursive:true});
+for(const [pkg,name] of [['electron','ELECTRON'],['three','THREE'],['adm-zip','ADM-ZIP']]) fs.copyFileSync(path.join(root,'node_modules',pkg,'LICENSE'),path.join(root,'build/licenses',name+'-LICENSE.txt'));
+for (const f of ['index.html', 'style.css']) fs.copyFileSync(path.join(root, 'src/renderer', f), path.join(root, 'build', f));
+esbuild.buildSync({entryPoints:[path.join(root,'src/renderer/app.js')],bundle:true,outfile:path.join(root,'build/app.js'),platform:'browser',target:'chrome140',format:'iife',minify:false,sourcemap:true});
+console.log('Built renderer.');

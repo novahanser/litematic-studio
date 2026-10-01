@@ -1,0 +1,26 @@
+Litematic Studio uses these open-source runtime components:
+
+Electron 44.1.0 — Electron contributors, MIT
+https://github.com/electron/electron
+The distribution includes Chromium and its third-party notices in
+LICENSES.chromium.html. Electron's license is also included under build/licenses.
+
+Three.js 0.186.1 — Three.js authors, MIT
+https://github.com/mrdoob/three.js
+See build/licenses/THREE-LICENSE.txt.
+
+adm-zip 0.6.1 — ADM-ZIP contributors, MIT
+https://github.com/cthackers/adm-zip
+See build/licenses/ADM-ZIP-LICENSE.txt.
+
+Build/development tools (not required on the user's computer):
+electron-builder, esbuild, Playwright; versions are pinned in package-lock.json.
+
+Minecraft is a trademark of Microsoft/Mojang. This independent viewer is not
+an official Minecraft product. Minecraft textures, models, game code, language
+assets, resource packs, and the user's schematic are not included in the app.
+The app reads game resources from files selected on the user's own computer.
+
+Existing viewer repositories were reviewed for suitability but their source
+code and bundled Minecraft assets were not copied into this application.
+See docs/OPEN-SOURCE-REVIEW.md for the research record.

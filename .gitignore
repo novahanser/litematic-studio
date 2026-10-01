@@ -1,0 +1,14 @@
+node_modules/
+build/
+dist/
+test-results/
+*.log
+docs/TEST-SAMPLE.json
+docs/VALIDATION.md
+docs/LOCAL-*.json
+*.litematic
+*.jar
+.env
+.env.*
+*.zip
+*.exe
