@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { buildFluidGeometry } from './fluid-geometry.js';
+import { buildFluidGeometry, isWaterState } from './fluid-geometry.js';
 import { attachCursorZoom } from './cursor-zoom.js';
-import { faceVertexUVs } from './model-uv.js';
+import { faceVertexUVs, clampFaceUVPatches } from './model-uv.js';
 
 const DEG = Math.PI / 180;
 const FACE_NORMALS = { north: [0, 0, -1], south: [0, 0, 1], west: [-1, 0, 0], east: [1, 0, 0], up: [0, 1, 0], down: [0, -1, 0] };
@@ -65,6 +65,9 @@ function partRotation(part) {
 
 function tintFor(block, face, asset) {
   const name = block?.Name || '', props = block?.Properties || {};
+  if (Array.isArray(face.colorRGB) && face.colorRGB.length === 3 && face.colorRGB.every(Number.isFinite)) {
+    return new THREE.Color().setRGB(...face.colorRGB, THREE.SRGBColorSpace);
+  }
   if (face.tintindex == null && !name.endsWith(':water')) return new THREE.Color(1, 1, 1);
   if (asset?.tint) return new THREE.Color(asset.tint);
   if (name.includes('redstone_wire')) {
@@ -92,6 +95,8 @@ export function buildStateGeometry(asset, block, atlas) {
     for (const element of part.elements || []) {
       const from = element.from || [0, 0, 0], to = element.to || [16, 16, 16];
       const elementRotation = element.rotation;
+      const elementTransform = Array.isArray(element.transform) && element.transform.length === 16 && element.transform.every(Number.isFinite)
+        ? new THREE.Matrix4().fromArray(element.transform) : null;
       let rotation = null, origin = null, scale = null;
       if (elementRotation?.axis) {
         const angle = (elementRotation.angle || 0) * DEG;
@@ -110,30 +115,48 @@ export function buildStateGeometry(asset, block, atlas) {
         const points = raw.map(p => {
           const v = new THREE.Vector3(...p).divideScalar(16);
           if (rotation) v.sub(origin).applyMatrix4(rotation).multiply(scale).add(origin);
+          if (elementTransform) v.multiplyScalar(16).applyMatrix4(elementTransform).divideScalar(16);
           return v.subScalar(0.5).applyMatrix4(blockRotation).addScalar(0.5);
         });
-        const normal = new THREE.Vector3().subVectors(points[1], points[0]).cross(new THREE.Vector3().subVectors(points[2], points[0])).normalize();
+        const normal = new THREE.Vector3().subVectors(points[1], points[0]).cross(new THREE.Vector3().subVectors(points[2], points[0]));
+        // Some vanilla flat plant elements still declare their four zero-area
+        // edge faces. Keep the real front/back surfaces and omit only edges.
+        if (normal.lengthSq() < 1e-20) continue;
+        normal.normalize();
         const uv = face.uv || defaultFaceUV(direction, from, to);
         const sourceUVs = faceVertexUVs(direction, uv, face.rotation || 0, part);
         const region = atlas.regions[face.texture] || atlas.regions.__missing__ || atlas.regions[fallbackTexture];
         const tint = tintFor(block, face, asset);
-        const start = positions.length / 3;
-        const boundary = boundaryOf(points, normal);
         const worldDirection = Object.keys(FACE_NORMALS).find(name => normal.dot(new THREE.Vector3(...FACE_NORMALS[name])) > 0.99999) || null;
         const axis = worldDirection ? FACE_NORMALS[worldDirection].findIndex(n => n !== 0) : -1;
         const planarAxes = [0, 1, 2].filter(n => n !== axis);
-        quads.push({ boundary, direction: worldDirection, planarAxes, opaque: region.opaque === true, min: planarAxes.map(a => Math.min(...points.map(p => p.getComponent(a)))), max: planarAxes.map(a => Math.max(...points.map(p => p.getComponent(a)))) });
-        for (let i = 0; i < 4; i++) {
-          positions.push(points[i].x, points[i].y, points[i].z);
-          normals.push(normal.x, normal.y, normal.z);
-          colors.push(tint.r, tint.g, tint.b);
-          const [u, v] = sourceUVs[i];
-          // A small inset keeps nearest-neighbour sampling inside this atlas tile.
-          const px = region.x + 0.02 + (u / 16) * (region.width - 0.04);
-          const py = region.y + 0.02 + (v / 16) * (region.height - 0.04);
-          uvs.push(px / atlas.width, 1 - py / atlas.height);
+        const patches = clampFaceUVPatches(sourceUVs);
+        for (const patch of patches) {
+          const patchPoints = patches.length === 1 ? points : patch.corners.map(([s, t]) => points[0].clone()
+            .addScaledVector(new THREE.Vector3().subVectors(points[3], points[0]), s)
+            .addScaledVector(new THREE.Vector3().subVectors(points[1], points[0]), t));
+          // Vanilla skulls use entityCutoutNoCullZOffset. Encode that verified
+          // local exception as reversed quads so ordinary block materials and
+          // the shared transparent batch can retain FrontSide throughout.
+          const orders = asset?.renderType === 'entity-cutout-no-cull' ? [[0, 1, 2, 3], [0, 3, 2, 1]] : [[0, 1, 2, 3]];
+          for (let side = 0; side < orders.length; side++) {
+            const faceNormal = side ? normal.clone().negate() : normal;
+            const start = positions.length / 3, boundary = boundaryOf(patchPoints, faceNormal);
+            quads.push({ boundary, direction: side ? OPPOSITE[worldDirection] || null : worldDirection, planarAxes,
+              opaque: region.opaque === true, min: planarAxes.map(a => Math.min(...patchPoints.map(p => p.getComponent(a)))), max: planarAxes.map(a => Math.max(...patchPoints.map(p => p.getComponent(a)))) });
+            for (const i of orders[side]) {
+              positions.push(patchPoints[i].x, patchPoints[i].y, patchPoints[i].z);
+              normals.push(faceNormal.x, faceNormal.y, faceNormal.z);
+              colors.push(tint.r, tint.g, tint.b);
+              const [u, v] = patch.uvs[i];
+              // A small inset keeps nearest-neighbour sampling inside this atlas tile.
+              const px = region.x + 0.02 + (u / 16) * (region.width - 0.04);
+              const py = region.y + 0.02 + (v / 16) * (region.height - 0.04);
+              uvs.push(px / atlas.width, 1 - py / atlas.height);
+            }
+            indices.push(start, start + 1, start + 2, start, start + 2, start + 3);
+          }
         }
-        indices.push(start, start + 1, start + 2, start, start + 2, start + 3);
       }
     }
   }
@@ -260,15 +283,19 @@ export function atlasHitVisible(hit, atlas) {
   return effectiveAlpha >= material.alphaTest && (!material.transparent || effectiveAlpha > 0);
 }
 
-export function createBlockMaterial(atlas, transparent = false) {
+export function createBlockMaterial(atlas, transparent = false, asset = null) {
   // Minecraft model faces are directional. Some redstone models deliberately
   // face luminous quads inward; DoubleSide exposes them as solid red boxes.
   // Models that need both sides already declare both face directions.
   return new THREE.MeshLambertMaterial({ map: atlas.texture, vertexColors: true,
-    alphaTest: transparent ? 0.001 : 0.08, transparent, depthWrite: !transparent, side: THREE.FrontSide });
+    alphaTest: asset?.renderType === 'entity-cutout-no-cull' ? 0.1 : transparent ? 0.001 : 0.08,
+    transparent, depthWrite: !transparent, side: THREE.FrontSide });
 }
 
 export function transparentState(block, asset, geometry) {
+  // A cutout entity sheet may contain unused translucent texels. Its original
+  // render type still alpha-tests visible pixels and writes opaque depth.
+  if (asset?.renderType === 'entity-cutout-no-cull') return false;
   return !!asset?.transparent || !!geometry?.userData.hasTranslucentTexture || /(?:stained_glass|:glass(?:_pane)?$|:water$|:ice$|:frosted_ice$|:slime_block$|:honey_block$)/.test(block?.Name || '');
 }
 
@@ -556,7 +583,7 @@ export class SchematicViewer {
       const transparent = transparentState(block, asset, geometry);
       this.stateGeometries.set(state, geometry);
       if (transparent) continue;
-      const material = createBlockMaterial(atlas);
+      const material = createBlockMaterial(atlas, false, asset);
       const mesh = new THREE.InstancedMesh(geometry, material, count);
       mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       mesh.userData.blockIndices = [];
@@ -573,7 +600,7 @@ export class SchematicViewer {
     if (!this.schematic) return;
     const matrix = new THREE.Matrix4(), seen = new Set();
     for (const mesh of this.meshes) if (mesh.isInstancedMesh) { mesh.count = 0; mesh.userData.blockIndices = []; }
-    const box = new THREE.Box3();
+    const box = new THREE.Box3(), blockBox = new THREE.Box3();
     for (const index of indices) {
       if (!Number.isInteger(index) || seen.has(index)) continue;
       const block = this.schematic.blocks[index]; if (!block) continue;
@@ -585,8 +612,7 @@ export class SchematicViewer {
         mesh.setMatrixAt(mesh.count++, matrix);
         mesh.userData.blockIndices.push(index);
       }
-      box.expandByPoint(new THREE.Vector3(block.x, block.y, block.z));
-      box.expandByPoint(new THREE.Vector3(block.x + 1, block.y + 1, block.z + 1));
+      box.union(this.blockBounds(index, blockBox));
     }
     this.visibleIndices = [...seen]; this.visibleSet = seen; this.visibleBounds = box;
     for (const mesh of this.meshes) if (mesh.isInstancedMesh) {
@@ -638,9 +664,21 @@ export class SchematicViewer {
   bounds() {
     if (this.visibleBounds && !this.visibleBounds.isEmpty()) return this.visibleBounds.clone();
     if (!this.schematic?.blocks.length) return new THREE.Box3(new THREE.Vector3(-5, 0, -5), new THREE.Vector3(5, 10, 5));
-    const box = new THREE.Box3();
-    for (const b of this.schematic.blocks) { box.expandByPoint(new THREE.Vector3(b.x, b.y, b.z)); box.expandByPoint(new THREE.Vector3(b.x + 1, b.y + 1, b.z + 1)); }
+    const box = new THREE.Box3(), blockBox = new THREE.Box3();
+    for (let index = 0; index < this.schematic.blocks.length; index++) box.union(this.blockBounds(index, blockBox));
     return box;
+  }
+
+  blockBounds(index, target = new THREE.Box3()) {
+    target.makeEmpty();
+    const block = this.schematic?.blocks[index]; if (!block) return target;
+    const geometry = this.stateGeometries?.get(block.state) || this.stateMeshes?.get(block.state)?.geometry;
+    if (geometry?.boundingBox && !geometry.boundingBox.isEmpty()) target.copy(geometry.boundingBox);
+    const state = this.schematic.palette?.[block.state], asset = this.assets?.blocks?.[block.state];
+    if (target.isEmpty() || isWaterState(state, asset)) {
+      target.expandByPoint(new THREE.Vector3()); target.expandByPoint(new THREE.Vector3(1, 1, 1));
+    }
+    return target.translate(new THREE.Vector3(block.x, block.y, block.z));
   }
 
   rebuildGrid() {
@@ -776,7 +814,15 @@ export class SchematicViewer {
 
   focus(index) {
     const block = this.schematic?.blocks[index]; if (!block) return;
-    this.focusPoint(new THREE.Vector3(block.x + 0.5, block.y + 0.5, block.z + 0.5));
+    const box = this.blockBounds(index), radius = box.getSize(new THREE.Vector3()).length() / 2;
+    const fov = (this.camera.fov || 42) * DEG / 2, aspect = this.camera.aspect || 1;
+    const angle = Math.min(fov, Math.atan(Math.tan(fov) * aspect));
+    const distance = Math.max(9, radius / Math.sin(angle) * 1.08);
+    this.focusPoint(box.getCenter(new THREE.Vector3()), distance);
+    if (this.camera.isOrthographicCamera) {
+      this.camera.zoom = this.orthoHeight / Math.max(2, distance * .75, radius * 2.16 / Math.min(1, aspect));
+      this.camera.updateProjectionMatrix(); this.invalidate();
+    }
     this.select(index);
   }
 

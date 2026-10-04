@@ -144,6 +144,22 @@ test('only visible opaque neighbours mask water and transparent dry glass preser
   withStone.dispose(); hiddenStone.dispose(); glass.dispose();
 });
 
+test('binary-alpha trapdoor holes do not let the model box erase the adjacent water surface', async () => {
+  const [{ buildFluidGeometry }] = await imports;
+  const trapdoor = asset({ from: [0, 0, 0], to: [3, 16, 16], faces: { west: { texture: 'trapdoor' }, east: { texture: 'trapdoor' } } });
+  const schematic = { palette: [water(), { Name: 'minecraft:iron_trapdoor', Properties: { open: 'true' } }], blocks: [
+    { x: 0, y: 0, z: 0, state: 0 }, { x: 1, y: 0, z: 0, state: 1 },
+  ] };
+  for (const opaque of [true, false]) {
+    const localAtlas = { ...atlas, regions: { ...atlas.regions, trapdoor: { x: 44, y: 2, width: 16, height: 16, opaque, translucent: false } } };
+    const geometry = buildFluidGeometry(schematic, [0, 1], makeAssets([asset(), trapdoor]), localAtlas);
+    const contact = faces(geometry).filter(face => atPlane(face, 0, 1));
+    assert.equal(contact.length, opaque ? 0 : 1, 'cutout alpha has no fractional pixels but still exposes the water');
+    if (!opaque) close(area(contact[0]), 8 / 9);
+    geometry.dispose();
+  }
+});
+
 test('element rotations and zero-thickness foliage do not create NaNs or fill the whole waterlogged block', async () => {
   const [{ buildFluidGeometry }] = await imports;
   const model = asset(box([6, 0, 6], [10, 16, 10], { axis: 'y', angle: 45, origin: [8, 8, 8], rescale: true }), box([0, 0, 8], [16, 16, 8]));
@@ -152,6 +168,15 @@ test('element rotations and zero-thickness foliage do not create NaNs or fill th
   const topArea = faces(geometry).filter(face => face.normal[1] > 0).reduce((sum, face) => sum + area(face), 0);
   assert.ok(topArea > 0.7 && topArea < 1);
   geometry.dispose();
+});
+
+test('special-model pixel transforms also move the solid volume subtracted from contained water', async () => {
+  const [{ buildFluidGeometry }, THREE] = await imports;
+  const model = asset({ ...box([0, 0, 0], [8, 16, 16]), transform: new THREE.Matrix4().makeTranslation(8, 0, 0).toArray() });
+  const geometry = buildFluidGeometry({ palette: [contained('custom_pose')], blocks: [{ x: 0, y: 0, z: 0, state: 0 }] }, [0], makeAssets([model]), atlas);
+  close(geometry.boundingBox.min.x, 0); close(geometry.boundingBox.max.x, .5);
+  const topArea = faces(geometry).filter(face => face.normal[1] > 0).reduce((sum, face) => sum + area(face), 0);
+  close(topArea, .5); geometry.dispose();
 });
 
 test('cached geometry rebuilds are deterministic and do not alter input states or solid assets', async () => {

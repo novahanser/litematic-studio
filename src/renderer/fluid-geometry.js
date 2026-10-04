@@ -45,6 +45,11 @@ function modelBoxes(asset) {
       const from = (element.from || [0, 0, 0]).map(v => v / 16), to = (element.to || [16, 16, 16]).map(v => v / 16);
       if (from.some((v, i) => !Number.isFinite(v) || !Number.isFinite(to[i]) || to[i] - v < EPS)) continue;
       let transform = block.clone();
+      if (Array.isArray(element.transform) && element.transform.length === 16 && element.transform.every(Number.isFinite)) {
+        transform.multiply(new THREE.Matrix4().makeScale(1 / 16, 1 / 16, 1 / 16)
+          .multiply(new THREE.Matrix4().fromArray(element.transform))
+          .multiply(new THREE.Matrix4().makeScale(16, 16, 16)));
+      }
       if (element.rotation?.axis) {
         const rotation = element.rotation, angle = (rotation.angle || 0) * Math.PI / 180;
         const origin = (rotation.origin || [8, 8, 8]).map(v => v / 16), scale = [1, 1, 1];
@@ -159,10 +164,14 @@ function facePoints(direction, a, b) {
 
 function opaqueSolid(state, asset, atlas) {
   if (asset?.transparent || state.Name.startsWith('minecraft:') && POROUS.test(state.Name.slice(10)) || /(?:glass|:ice$|:frosted_ice$|:slime_block$|:honey_block$)/.test(state.Name)) return false;
-  // Resource packs can make an otherwise solid block translucent. Match the
-  // viewer's atlas-derived blending classification before hiding a water face.
+  // Both translucent sprites and binary cutout holes reveal the water behind
+  // them. A model's rectangular element cannot occlude through those holes.
+  // Only known fully opaque sprites may hide an adjacent water surface.
   return !(asset?.parts || []).some(part => (part.elements || []).some(element =>
-    Object.values(element.faces || {}).some(face => atlas.regions?.[face?.texture]?.translucent === true)));
+    Object.values(element.faces || {}).some(face => {
+      const region = atlas.regions?.[face?.texture];
+      return region?.opaque === false || region?.translucent === true;
+    })));
 }
 
 /** Water and waterlogged volumes in WORLD coordinates, ready to merge into the

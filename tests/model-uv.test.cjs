@@ -89,3 +89,28 @@ test('full-turn wrapping, defaults, and input validation are deterministic', asy
   assert.throws(() => faceVertexUVs('up', [0, 0, 16, 16], 45), /90/);
   assert.throws(() => faceVertexUVs('up', [0, 0, 16, 16], 0, { x: 45, uvlock: true }), /90/);
 });
+
+test('out-of-range UV patches clamp within one sprite without stretching the original in-range mapping', async () => {
+  const [{ faceVertexUVs, clampFaceUVPatches }] = await imports;
+  for (const rectangle of [[-8, -16, 24, 32], [24, 32, -8, -16], [-16, 0, -8, 16], [0, 0, 16, 16], [20, -10, 20, 30]]) {
+    for (const direction of directions) for (const rotation of angles) for (const y of angles) {
+      const original = faceVertexUVs(direction, rectangle, rotation, { x: 90, y, uvlock: true });
+      const patches = clampFaceUVPatches(original);
+      assert.ok(patches.length >= 1 && patches.length <= 9);
+      let area = 0;
+      for (const patch of patches) {
+        const [a, , c] = patch.corners; area += (c[0] - a[0]) * (c[1] - a[1]);
+        for (let i = 0; i < 4; i++) {
+          const [s, t] = patch.corners[i];
+          for (let axis = 0; axis < 2; axis++) {
+            const expected = Math.max(0, Math.min(16, original[0][axis] + (original[3][axis] - original[0][axis]) * s + (original[1][axis] - original[0][axis]) * t));
+            assert.ok(Math.abs(patch.uvs[i][axis] - expected) < 1e-9);
+          }
+        }
+      }
+      assert.ok(Math.abs(area - 1) < 1e-9, 'patches preserve the whole geometric surface');
+    }
+  }
+  const original = faceVertexUVs('up', [2, 4, 8, 16]);
+  assert.deepEqual(clampFaceUVPatches(original), [{ corners: [[0, 0], [0, 1], [1, 1], [1, 0]], uvs: original }]);
+});

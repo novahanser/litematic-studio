@@ -242,3 +242,36 @@ test('projection switching preserves framing and orthographic fit, zoom and focu
   viewer.resize(); assert.ok(viewer.camera.left < 0 && viewer.camera.right > 0);
   for (const direction of ['front', 'back', 'side', 'left', 'top', 'bottom']) { viewer.view(direction); assert.ok(viewer.camera.position.toArray().every(Number.isFinite)); }
 });
+
+test('out-of-range sprite UV patches preserve neighbour clipping, sorted face identity and ray picking', async () => {
+  const [{ buildStateGeometry, buildTransparentGeometry, sortTransparentFaces, SchematicViewer, createBlockMaterial }, THREE] = await imports;
+  const localAtlas = { texture: null, width: 64, height: 64, regions: {
+    glass: { x: 2, y: 2, width: 16, height: 16, opaque: false },
+    solid: { x: 24, y: 2, width: 16, height: 16, opaque: true },
+  } };
+  const schematic = { palette: [{ Name: 'minecraft:glass' }, stone], blocks: [{ x: 0, y: 0, z: 0, state: 0 }, { x: 1, y: 0, z: 0, state: 1 }] };
+  const assets = { blocks: [
+    { parts: [{ elements: [{ ...cube(), faces: { east: { texture: 'glass', uv: [-8, -8, 24, 24] } } }] }] },
+    { parts: [{ elements: [{ ...cube(), to: [16, 8, 16], faces: { west: { texture: 'solid' } } }] }] },
+  ] };
+  const source = new Map(assets.blocks.map((a, i) => [i, buildStateGeometry(a, schematic.palette[i], localAtlas)]));
+  assert.equal(source.get(0).index.count / 6, 9, 'only the out-of-range face needs subdivision');
+  const geometry = buildTransparentGeometry(schematic, [1, 0], source, assets);
+  assert.equal(geometry.index.count / 6, 6, 'the opaque neighbour clips the lower half of the subdivided face');
+  const { position, uv } = geometry.attributes;
+  for (let i = 0; i < position.count; i++) {
+    const y = position.getY(i), z = position.getZ(i);
+    assert.ok(y >= .5);
+    const expectedU = Math.max(0, Math.min(16, 24 - 32 * z)), expectedV = Math.max(0, Math.min(16, 24 - 32 * y));
+    close(uv.getX(i), (2.02 + expectedU / 16 * 15.96) / 64);
+    close(uv.getY(i), 1 - (2.02 + expectedV / 16 * 15.96) / 64);
+  }
+  assert.ok(geometry.userData.blockIndices.every(index => index === 0));
+  const camera = new THREE.PerspectiveCamera(40, 1, .1, 100);
+  camera.position.set(5, .75, .5); camera.lookAt(1, .75, .5); sortTransparentFaces(geometry, camera);
+  const material = createBlockMaterial(localAtlas, true), mesh = new THREE.Mesh(geometry, material); mesh.updateMatrixWorld(true);
+  const viewer = Object.create(SchematicViewer.prototype);
+  Object.assign(viewer, { schematic, meshes: [mesh], camera, pointer: new THREE.Vector2(), raycaster: new THREE.Raycaster(), renderer: { domElement: { getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) } } });
+  assert.equal(viewer.pick({ clientX: 50, clientY: 50 }), 0);
+  geometry.dispose(); source.forEach(g => g.dispose()); material.dispose();
+});

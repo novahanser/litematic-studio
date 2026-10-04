@@ -2,6 +2,7 @@ node_modules/
 build/
 dist/
 test-results/
+logs/
 *.log
 docs/TEST-SAMPLE.json
 docs/VALIDATION.md

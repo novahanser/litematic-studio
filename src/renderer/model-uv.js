@@ -67,3 +67,31 @@ export function faceVertexUVs(direction, uvRect = [0, 0, 16, 16], faceRotation =
   const [a, b, c, d] = inverseFaceMatrix(direction, quadrant(part.x ?? 0), quadrant(part.y ?? 0));
   return result.map(([u, v]) => [a * (u - 8) + b * (v - 8) + 8, c * (u - 8) + d * (v - 8) + 8]);
 }
+
+/** Isolate out-of-range custom-model UVs from neighbouring atlas sprites.
+ * Split at 0/16 crossings before clamping so the in-range part keeps its exact
+ * scale. Clamping only the original four vertices would stretch that part over
+ * the whole face. At most nine ordinary four-vertex quads are returned; each
+ * parameter pair addresses the original face as TL=(0,0), BL=(0,1), BR=(1,1),
+ * TR=(1,0). Vanilla UVs use the unchanged one-patch path. */
+export function clampFaceUVPatches(uvs) {
+  const corners = [[0, 0], [0, 1], [1, 1], [1, 0]];
+  if (uvs.every(uv => uv.every(v => v >= 0 && v <= 16))) return [{ corners, uvs }];
+  const sCuts = new Set([0, 1]), tCuts = new Set([0, 1]);
+  const alongS = uvs[3].map((v, i) => v - uvs[0][i]);
+  const alongT = uvs[1].map((v, i) => v - uvs[0][i]);
+  for (let axis = 0; axis < 2; axis++) for (const edge of [0, 16]) {
+    for (const [amount, cuts] of [[alongS[axis], sCuts], [alongT[axis], tCuts]]) {
+      if (Math.abs(amount) < 1e-12) continue;
+      const crossing = (edge - uvs[0][axis]) / amount;
+      if (crossing > 0 && crossing < 1) cuts.add(crossing);
+    }
+  }
+  const ss = [...sCuts].sort((a, b) => a - b), ts = [...tCuts].sort((a, b) => a - b), result = [];
+  for (let i = 1; i < ss.length; i++) for (let j = 1; j < ts.length; j++) {
+    const corners = [[ss[i - 1], ts[j - 1]], [ss[i - 1], ts[j]], [ss[i], ts[j]], [ss[i], ts[j - 1]]];
+    result.push({ corners, uvs: corners.map(([s, t]) => uvs[0].map((v, axis) =>
+      Math.max(0, Math.min(16, v + alongS[axis] * s + alongT[axis] * t)))) });
+  }
+  return result;
+}

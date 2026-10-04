@@ -203,7 +203,7 @@ test('uses explicit local entity textures and fluid textures with truthful fallb
   assert(assets.blocks[2].parts[0].elements[0].to[1] < 16);
   assert.equal(assets.blocks[2].parts[0].elements[0].faces.north.texture, 'minecraft:block/water_flow');
   assert.equal(assets.textureMeta['minecraft:block/water_still'].animated, true);
-  assert(assets.warnings.some(w => w.includes('静态近似模型')));
+  assert(assets.warnings.some(w => w.includes('闭合静态模型')));
 });
 
 function specialFixture(t, extra = {}) {
@@ -334,7 +334,7 @@ test('closed chest uses the actual five-pixel lid and latch height with outward 
     assert.equal(body.to[1], 9); assert.equal(lid.from[1], 9); assert.equal(lid.to[1], 14);
     assert.equal(latch.from[1], 7); assert.equal(latch.to[1], 11);
     assert.equal(body.faces.up, undefined); assert.equal(lid.faces.down, undefined);
-    assert.equal(lid.faces.north.uv[3] - lid.faces.north.uv[1], 5 / 4);
+    assert.equal(Math.abs(lid.faces.north.uv[3] - lid.faces.north.uv[1]), 5 / 4);
   });
 });
 

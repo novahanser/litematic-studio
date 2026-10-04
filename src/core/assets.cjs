@@ -221,6 +221,101 @@ function entityUv(u, v, width, height, depth, sheetWidth = 64, sheetHeight = 64)
   return Object.fromEntries(Object.entries(rects).map(([face, uv]) => [face, uv.map((n, i) => n * 16 / (i % 2 ? sheetHeight : sheetWidth))]));
 }
 
+// Entity model parts use their own axes, independently of block JSON axes.
+// These small affine helpers retain the complete hierarchy (including compound
+// rotations) instead of replacing tilted cuboids with their bounding boxes.
+function matrixMultiply(a, b) {
+  const out = Array(16).fill(0);
+  for (let column = 0; column < 4; column++) for (let row = 0; row < 4; row++)
+    for (let k = 0; k < 4; k++) out[column * 4 + row] += a[k * 4 + row] * b[column * 4 + k];
+  return out;
+}
+function poseMatrix(x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0, sx = 1, sy = sx, sz = sx) {
+  const cx = Math.cos(rx), ax = Math.sin(rx), cy = Math.cos(ry), ay = Math.sin(ry), cz = Math.cos(rz), az = Math.sin(rz);
+  const mx = [1, 0, 0, 0, 0, cx, ax, 0, 0, -ax, cx, 0, 0, 0, 0, 1];
+  const my = [cy, 0, -ay, 0, 0, 1, 0, 0, ay, 0, cy, 0, 0, 0, 0, 1];
+  const mz = [cz, az, 0, 0, -az, cz, 0, 0, 0, 0, 1, 0, x, y, z, 1];
+  const out = matrixMultiply(matrixMultiply(mz, my), mx);
+  for (let i = 0; i < 12; i++) out[i] *= [sx, sy, sz][Math.floor(i / 4)];
+  return out;
+}
+function rawEntityUv(u, v, width, height, depth, sheetWidth = 64, sheetHeight = 64) {
+  const uv = entityUv(u, v, width, height, depth, sheetWidth, sheetHeight);
+  const reverse = a => [a[2], a[3], a[0], a[1]];
+  return { up: uv.down, down: uv.up, north: reverse(uv.south), south: reverse(uv.north), west: reverse(uv.west), east: reverse(uv.east) };
+}
+function entityBox(from, size, uv, texture, transform, sheet = [64, 64], inflation = 0, mirror = false) {
+  const element = box(from.map(n => n - inflation), from.map((n, i) => n + size[i] + inflation), texture,
+    rawEntityUv(...uv, ...size, ...sheet));
+  // A mirrored entity cube reflects its texture net, not its physical cuboid.
+  if (mirror) {
+    [element.faces.west, element.faces.east] = [element.faces.east, element.faces.west];
+    for (const face of Object.values(element.faces)) [face.uv[0], face.uv[2]] = [face.uv[2], face.uv[0]];
+  }
+  element.transform = transform;
+  return element;
+}
+
+const DYE_COLORS = Object.freeze({ white: 16383998, orange: 16351261, magenta: 13061821, light_blue: 3847130,
+  yellow: 16701501, lime: 8439583, pink: 15961002, gray: 4673362, light_gray: 10329495,
+  cyan: 1481884, purple: 8991416, blue: 3949738, brown: 8606770, green: 6192150, red: 11546150, black: 1908001 });
+
+function copperStatueElements(texture, pose) {
+  // Dimensions, pivots and UV origins were checked against the locally installed
+  // 1.21.11 model layers. This is an original cuboid/affine conversion, with no
+  // game archive, exported mesh or game code embedded in the application.
+  const root = poseMatrix(8, 0, 8, 0, 0, Math.PI), elements = [];
+  const child = (parent, p) => matrixMultiply(parent, poseMatrix(...p));
+  const cube = (parent, from, size, uv, inflation = 0) => elements.push(entityBox(from, size, uv, texture, parent, [64, 64], inflation));
+  const head = (parent, y = 0, x = 0, z = 0) => {
+    cube(parent, [-4, -5 + y, -5 + z], [8, 5, 10], [0, 0], pose === 'standing' ? .015 : 0);
+    cube(parent, [-1 + x, -2 + y, -6 + z], [2, 3, 2], [56, 0]);
+    cube(parent, [-1 + x, -9 + y, -1 + z], [2, 4, 2], [37, 8], -.015);
+    cube(parent, [-2, -13 + y, -2 + z], [4, 4, 4], [37, 0], -.015);
+  };
+  if (pose === 'running') {
+    cube(child(child(root, [.936, -5, 0]), [1, 0, 0, .7854]), [-2.088, -.1, -2], [4, 5, 4], [16, 27]);
+    cube(child(child(root, [-3.064, -5, 0]), [1.048, 0, -.9, -.8727]), [-1.856, -.1, -1.09], [4, 5, 4], [0, 27]);
+    const body = child(root, [-1.064, -5, 0]);
+    head(child(body, [.7, -5.6, -1.8]), -.1, -.02);
+    cube(child(child(body, [-4, -6, 0]), [.7, -.248, -1.62, 1.0036]), [-3.052, -1.11, -2.036], [3, 10, 4], [36, 16]);
+    cube(child(child(body, [4, -6, 0]), [.732, 0, 0, -.8715, -.0535, -.0449]), [.032, -1.1, -2], [3, 10, 4], [50, 16]);
+    cube(child(body, [1.1, .1, .7, .1204, -.0064, -.0779]), [-4.02, -6.116, -3.5], [8, 6, 6], [0, 15]);
+  } else if (pose === 'sitting') {
+    cube(child(child(root, [2, -2, -2.075]), [.05, -2, 1.075, -1.5708]), [-2, .975, 0], [4, 5, 4], [16, 27]);
+    cube(child(child(root, [-2.1, -2.1, -2.075]), [.05, -1.9, 1.075, -1.5708]), [-2, .975, 0], [4, 5, 4], [0, 27]);
+    const body = child(root, [0, -3, 2.325]);
+    cube(body, [-3, -4, -4.525], [6, 1, 6], [3, 19]);
+    cube(body, [-4, -3, -3.525], [8, 6, 6], [0, 15]);
+    const h = child(body, [0, -6, -.2]);
+    cube(h, [-1, -7, -3.3], [2, 4, 2], [37, 8], -.015);
+    cube(h, [-2, -11, -4.3], [4, 4, 4], [37, 0], -.015);
+    cube(h, [-4, -3, -7.325], [8, 5, 10], [0, 0]);
+    cube(h, [-1, 0, -8.325], [2, 3, 2], [56, 0]);
+    cube(child(child(body, [-4, -5.6, -1.8, .4363]), [0, .0893, .1198, -1.0472]), [-3.075, -.9733, -1.9966], [3, 10, 4], [36, 16]);
+    cube(child(child(body, [4, -5.6, -1.7, .4363]), [0, -.0015, -.0808, -1.0472]), [.075, -1.0443, -1.8997], [3, 10, 4], [50, 16]);
+    cube(child(body, [0, -1, -4.325, 0, 0, -3.1416]), [-4, -3, -2.2], [8, 6, 3], [3, 18]);
+  } else {
+    const star = pose === 'star';
+    if (star) {
+      cube(child(child(root, [1, -5, 0]), [1.65, 2, 0, 0, 0, -.2618]), [-2, -2.5, -2], [4, 5, 4], [16, 27]);
+      cube(child(child(root, [-3, -5, 0]), [.35, 2, .01, 0, 0, .2618]), [-2, -2.5, -2], [4, 5, 4], [0, 27]);
+    } else {
+      cube(child(root, [0, -5, 0]), [0, 0, -2], [4, 5, 4], [16, 27]);
+      cube(child(root, [0, -5, 0]), [-4, 0, -2], [4, 5, 4], [0, 27]);
+    }
+    const body = child(root, [0, -5, 0]);
+    cube(body, [-4, -6, -3], [8, 6, 6], [0, 15]);
+    head(child(body, [0, -6, 0]));
+    for (const left of [false, true]) {
+      const arm = child(body, [left ? 4 : -4, -6, 0]);
+      cube(star ? child(arm, [left ? -1 : 1, 1, 0, 0, 0, left ? -1.9199 : 1.9199]) : arm,
+        star ? [-1.5, -5, -2] : [left ? 0 : -3, -1, -2], [3, 10, 4], [left ? 50 : 36, 16]);
+    }
+  }
+  return elements;
+}
+
 function crc32(buffer) {
   let crc = 0xffffffff;
   for (const byte of buffer) {
@@ -326,10 +421,13 @@ function loadAssets(jarPath, palette, options = {}) {
   }
   function resolvedTexture(reference, variables) {
     const seen = new Set();
-    while (typeof reference === 'string' && reference.startsWith('#')) {
+    // The client also accepts a texture-slot name without '#', as used by the
+    // shipped heavy_core model. Prefer a defined slot; a namespaced/path value
+    // with no such slot remains a direct resource ID.
+    while (typeof reference === 'string' && (reference.startsWith('#') || Object.hasOwn(variables, reference))) {
       if (seen.has(reference) || seen.size > 64) return texture(MISSING);
       seen.add(reference);
-      reference = variables[reference.slice(1)];
+      reference = variables[reference.startsWith('#') ? reference.slice(1) : reference];
     }
     return texture(reference || MISSING);
   }
@@ -366,20 +464,39 @@ function loadAssets(jarPath, palette, options = {}) {
     if (/(?:^|_)chest$/.test(localName)) {
       let type = localName === 'ender_chest' ? 'ender' : localName === 'trapped_chest' ? 'trapped' : 'normal';
       if (localName.includes('copper')) type = localName.includes('oxidized') ? 'copper_oxidized' : localName.includes('weathered') ? 'copper_weathered' : localName.includes('exposed') ? 'copper_exposed' : 'copper';
+      if (localName !== 'ender_chest' && ['left', 'right'].includes(properties.type)) {
+        const half = properties.type, right = half === 'right', tex = texture(`minecraft:entity/chest/${type}_${half}`);
+        const identity = poseMatrix();
+        const body = entityBox([right ? 1 : 0, 0, 1], [15, 10, 14], [0, 19], tex, identity);
+        body.to[1] = 9;
+        for (const d of ['north', 'south', 'west', 'east']) body.faces[d].uv[1] -= 1 / 4;
+        const lid = entityBox([right ? 1 : 0, 9, 1], [15, 5, 14], [0, 0], tex, identity);
+        const lock = entityBox([right ? 15 : 0, 7, 15], [1, 4, 1], [0, 0], tex, identity);
+        delete body.faces.up; delete lid.faces.down;
+        // Keep the native join faces: a schematic, layer or block filter can
+        // expose either half on its own. Vanilla leaves their texture regions
+        // fully transparent, so sample the same half's opaque outside end for
+        // this preview cap. The neighbouring half hides it in a complete pair.
+        const join = right ? 'east' : 'west', outside = right ? 'west' : 'east';
+        for (const element of [body, lid, lock]) element.faces[join] = {
+          ...element.faces[outside], uv: element.faces[outside].uv.slice(), previewCap: true,
+        };
+        return { parts: [{ x: 0, y: (facingY + 180) % 360, uvlock: false, elements: [body, lid, lock] }],
+          reason: '箱子按 left/right 状态使用本地双箱材质与闭合模型；分离显示时连接端使用外侧材质封口，未模拟开盖' };
+      }
       const tex = texture(`minecraft:entity/chest/${type}`);
-      const scale = rect => rect.map(n => n / 4);
-      const bodyUv = { up: scale([14, 19, 28, 33]), down: scale([28, 19, 42, 33]), north: scale([14, 33, 28, 43]),
-        south: scale([42, 33, 56, 43]), west: scale([0, 33, 14, 43]), east: scale([28, 33, 42, 43]) };
-      const lidUv = { up: scale([14, 0, 28, 14]), down: scale([28, 0, 42, 14]), north: scale([14, 14, 28, 19]),
-        south: scale([42, 14, 56, 19]), west: scale([0, 14, 14, 19]), east: scale([28, 14, 42, 19]) };
-      const lockUv = Object.fromEntries(DIRECTIONS.map(direction => [direction, scale([1, 1, 3, 5])]));
+      const chestUv = (u, v, w, h, d) => {
+        const uv = rawEntityUv(u, v, w, h, d), flip = a => [a[2], a[3], a[0], a[1]];
+        return { up: flip(uv.up), down: flip(uv.down), north: uv.south, south: uv.north, west: uv.east, east: uv.west };
+      };
+      const bodyUv = chestUv(0, 19, 14, 10, 14), lidUv = chestUv(0, 0, 14, 5, 14), lockUv = chestUv(0, 0, 2, 4, 1);
       // The closed lid spans y=9..14 and its latch y=7..11. The body is
       // cropped to the exposed nine pixels to avoid coplanar overlapping walls.
-      for (const face of ['north', 'south', 'west', 'east']) bodyUv[face][1] += 1 / 4;
+      for (const face of ['north', 'south', 'west', 'east']) bodyUv[face][1] -= 1 / 4;
       const body = box([1, 0, 1], [15, 9, 15], tex, bodyUv), lid = box([1, 9, 1], [15, 14, 15], tex, lidUv);
       delete body.faces.up; delete lid.faces.down;
       return { parts: [{ x: 0, y: facingY, uvlock: false, elements: [body,
-        lid, box([7, 7, 0], [9, 11, 1], tex, lockUv)] }], reason: '箱子使用本地实体材质与静态近似模型；双箱连接和开盖动画未模拟' };
+        lid, box([7, 7, 0], [9, 11, 1], tex, lockUv)] }], reason: '箱子使用本地实体材质与闭合静态模型；未模拟开盖' };
     }
     if (localName.endsWith('shulker_box')) {
       const color = localName === 'shulker_box' ? '' : `_${localName.slice(0, -12)}`;
@@ -444,21 +561,115 @@ function loadAssets(jarPath, palette, options = {}) {
     if (localName.endsWith('_banner')) {
       const wall = localName.includes('_wall_');
       const color = localName.replace(/_(wall_)?banner$/, '');
-      const cloth = texture(`minecraft:block/${color}_wool`);
-      const pole = texture('minecraft:block/oak_planks');
-      const elements = [box([1, 1, wall ? 13 : 7], [15, wall ? 16 : 29, wall ? 14 : 8], cloth)];
-      if (!wall) elements.push(box([7, 0, 7], [9, 29, 9], pole));
-      return { parts: [{ x: 0, y: wall ? facingY : (Number(properties.rotation) || 0) * 22.5, uvlock: false, elements }],
-        reason: '旗帜使用本地对应颜色材质与静态近似模型；图案保存在 NBT 面板中' };
+      const tex = texture('minecraft:entity/banner_base');
+      const transform = poseMatrix(8, 0, 8, 0, 0, 0, 2 / 3, -2 / 3, -2 / 3);
+      const flag = entityBox([-10, wall ? -20.5 : -44, wall ? 8.5 : -2], [20, 40, 1], [0, 0], tex, transform);
+      const rgb = DYE_COLORS[color] ?? DYE_COLORS.white;
+      for (const face of Object.values(flag.faces)) face.colorRGB = [rgb >>> 16 & 255, rgb >>> 8 & 255, rgb & 255].map(n => n / 255);
+      const elements = [flag, entityBox([-10, wall ? -20.5 : -44, wall ? 9.5 : -1], [20, 2, 2], [0, 42], tex, transform)];
+      if (!wall) elements.push(entityBox([-1, -42, -1], [2, 42, 2], [44, 0], tex, transform));
+      return { parts: [{ x: 0, y: wall ? (facingY + 180) % 360 : (Number(properties.rotation) || 0) * 22.5, uvlock: false, elements }],
+        reason: '旗帜使用本地实体材质、染色及静止旗面；未叠加 NBT 图案与飘动动画，图案可在 NBT 面板查看' };
     }
     if (localName === 'decorated_pot') {
       const side = texture('minecraft:entity/decorated_pot/decorated_pot_side');
-      const top = texture('minecraft:block/terracotta');
-      return { parts: [{ x: 0, y: facingY, uvlock: false, elements: [box([1, 0, 1], [15, 14, 15], side),
-        box([5, 14, 5], [11, 16, 11], top)] }], reason: '饰纹陶罐使用本地材质与静态近似模型；陶片图案保存在 NBT 面板中' };
+      const base = texture('minecraft:entity/decorated_pot/decorated_pot_base');
+      const body = box([1, 0, 1], [15, 16, 15], side, Object.fromEntries(DIRECTIONS.map(d => [d, [1, 0, 15, 16]])));
+      body.faces.up = { texture: base, uv: [7, 13.5, 14, 6.5] };
+      body.faces.down = { texture: base, uv: [0, 6.5, 7, 13.5] };
+      const neck = poseMatrix(0, 37, 16, Math.PI);
+      const elements = [body, entityBox([4, 17, 4], [8, 3, 8], [0, 0], base, neck, [32, 32], -.1),
+        entityBox([5, 20, 5], [6, 1, 6], [0, 5], base, neck, [32, 32], .2)];
+      return { parts: [{ x: 0, y: facingY, uvlock: false, elements }], reason: '饰纹陶罐使用本地实体材质与静态模型；未叠加 NBT 陶片图案，图案可在 NBT 面板查看' };
     }
+    if (localName === 'conduit') {
+      const tex = texture('minecraft:entity/conduit/base');
+      return { parts: [{ x: 0, y: 0, uvlock: false, elements: [entityBox([-3, -3, -3], [6, 6, 6], [0, 0], tex,
+        poseMatrix(8, 8, 8), [32, 16])] }], reason: '潮涌核心显示未激活静态外壳；激活笼体、眼睛与水流效果依赖周围结构及运行状态' };
+    }
+    if (localName.endsWith('copper_golem_statue')) {
+      const oxidation = localName.includes('oxidized') ? 'oxidized_' : localName.includes('weathered') ? 'weathered_' : localName.includes('exposed') ? 'exposed_' : '';
+      const tex = texture(`minecraft:entity/copper_golem/${oxidation}copper_golem`);
+      const pose = ['standing', 'running', 'sitting', 'star'].includes(properties.copper_golem_pose) ? properties.copper_golem_pose : 'standing';
+      return { parts: [{ x: 0, y: facingY, uvlock: false, elements: copperStatueElements(tex, pose) }],
+        reason: '铜傀儡雕像使用本地实体材质及 standing/running/sitting/star 对应静态姿态' };
+    }
+    if (/(?:_head|_skull)$/.test(localName)) {
+      const wall = localName.includes('_wall_'), type = localName.replace('_wall', '').replace(/_(head|skull)$/, '');
+      const textureNames = { skeleton: 'skeleton/skeleton', wither_skeleton: 'skeleton/wither_skeleton', zombie: 'zombie/zombie',
+        creeper: 'creeper/creeper', player: 'player/wide/steve', dragon: 'enderdragon/dragon', piglin: 'piglin/piglin' };
+      if (textureNames[type]) {
+        const tex = texture(`minecraft:entity/${textureNames[type]}`);
+        const root = poseMatrix(8, wall ? 4 : 0, wall ? 12 : 8, 0, 0, Math.PI), elements = [];
+        const add = (from, size, uv, transform = root, sheet = [64, 64], inflate = 0, mirror = false) =>
+          elements.push(entityBox(from, size, uv, tex, transform, sheet, inflate, mirror));
+        if (type === 'dragon') {
+          // The layer's 0.75 scale also scales its -7.986666 pivot to -5.99.
+          const head = matrixMultiply(root, poseMatrix(0, -5.99, 0, 0, 0, 0, .75));
+          add([-6, -1, -24], [12, 5, 16], [176, 44], head, [256, 256]);
+          add([-8, -8, -10], [16, 16, 16], [112, 30], head, [256, 256]);
+          for (const left of [false, true]) {
+            add([left ? -5 : 3, -12, -4], [2, 4, 6], [0, 0], head, [256, 256], 0, left);
+            add([left ? -5 : 3, -3, -22], [2, 2, 4], [112, 0], head, [256, 256], 0, left);
+          }
+          add([-6, 0, -16], [12, 4, 16], [176, 65], matrixMultiply(head, poseMatrix(0, 4, -8, .2)), [256, 256]);
+        } else if (type === 'piglin') {
+          add([-5, -8, -4], [10, 8, 8], [0, 0]);
+          add([-2, -4, -5], [4, 4, 1], [31, 1]);
+          add([2, -2, -5], [1, 2, 1], [2, 4]); add([-3, -2, -5], [1, 2, 1], [2, 0]);
+          add([0, 0, -2], [1, 5, 4], [51, 6], matrixMultiply(root, poseMatrix(4.5, -6, 0, 0, 0, -.7)));
+          add([-1, 0, -2], [1, 5, 4], [39, 6], matrixMultiply(root, poseMatrix(-4.5, -6, 0, 0, 0, .7)));
+        } else {
+          const humanoid = type === 'player' || type === 'zombie', sheet = [64, humanoid ? 64 : 32];
+          add([-4, -8, -4], [8, 8, 8], [0, 0], root, sheet);
+          if (humanoid) add([-4, -8, -4], [8, 8, 8], [32, 0], root, sheet, .25);
+        }
+        return { parts: [{ x: 0, y: wall ? facingY : (Number(properties.rotation) || 0) * 22.5, uvlock: false, elements }],
+          renderType: 'entity-cutout-no-cull',
+          reason: type === 'player' ? '玩家头颅使用本地 Steve 默认皮肤；未读取或联网下载 NBT 自定义皮肤' : '头颅使用本地实体材质与静止模型；未模拟红石驱动动画' };
+      }
+    }
+    if (localName === 'end_portal' || localName === 'end_gateway') {
+      const tex = texture('minecraft:entity/end_portal');
+      const element = box([0, 0, 0], [16, localName === 'end_portal' ? 12 : 16, 16], tex,
+        Object.fromEntries(DIRECTIONS.map(d => [d, [0, 0, 16, 16]])));
+      if (localName === 'end_portal') for (const d of DIRECTIONS) if (d !== 'up' && d !== 'down') delete element.faces[d];
+      return { parts: [{ x: 0, y: 0, uvlock: false, elements: [element] }],
+        reason: '末地传送方块使用本地材质显示静态表面；未实现原版多层视差着色器及光柱', approximate: true };
+    }
+    if (localName === 'moving_piston') return { parts: [], unsupported: true,
+      reason: '移动活塞的外观依赖每个方块实体的被移动方块及进度；当前未重建，原始内容可在 NBT 面板查看' };
     const tex = particle || texture(existsTexture(`${name.split(':')[0]}:block/${localName}`) ? `${name.split(':')[0]}:block/${localName}` : MISSING);
-    return { parts: [{ x: 0, y: 0, uvlock: false, elements: [box([0, 0, 0], [16, 16, 16], tex)] }], reason: '此方块没有可读取的静态元素，使用材质立方体近似' };
+    return { parts: [{ x: 0, y: 0, uvlock: false, elements: [box([0, 0, 0], [16, 16, 16], tex)] }], unsupported: true,
+      reason: '不支持此方块的动态/特殊模型；当前仅用材质立方体标记位置，不能用于核对真实形状' };
+  }
+
+  function entitySupplement(name, properties) {
+    const facingY = { north: 0, east: 90, south: 180, west: 270 }[properties.facing] || 0;
+    if (name === 'minecraft:bell') {
+      const tex = texture('minecraft:entity/bell/bell_body');
+      return { parts: [{ x: 0, y: 0, uvlock: false, elements: [
+        entityBox([5, 6, 5], [6, 7, 6], [0, 0], tex, poseMatrix(), [32, 32]),
+        entityBox([4, 4, 4], [8, 2, 8], [0, 13], tex, poseMatrix(), [32, 32]),
+      ] }], reason: '钟体补充本地实体材质和静止模型；保留 JSON 支架，未模拟摇摆' };
+    }
+    if (name !== 'minecraft:enchanting_table' && !(name === 'minecraft:lectern' && properties.has_book === 'true')) return null;
+    const lectern = name === 'minecraft:lectern', tex = texture('minecraft:entity/enchanting_table_book');
+    // Tick zero is a stable snapshot. Lectern uses the client's fixed 1.2-open
+    // pose; the enchanting book is displayed open without player tracking.
+    const angle = lectern ? 1.5 : 1.25, offset = Math.sin(angle);
+    let root = poseMatrix(8, lectern ? 17 : 13.6, 8, 0, 0, (lectern ? 67.5 : 80) * Math.PI / 180);
+    if (lectern) root = matrixMultiply(root, poseMatrix(0, -2, 0));
+    const elements = [], add = (from, size, uv, position, ry) => elements.push(entityBox(from, size, uv, tex,
+      matrixMultiply(root, poseMatrix(...position, 0, ry, 0)), [64, 32]));
+    add([-6, -5, -.005], [6, 10, .005], [0, 0], [0, 0, -1], Math.PI + angle);
+    add([0, -5, -.005], [6, 10, .005], [16, 0], [0, 0, 1], -angle);
+    add([-1, -5, 0], [2, 10, .005], [12, 0], [0, 0, 0], Math.PI / 2);
+    add([0, -4, -.99], [5, 8, 1], [0, 10], [offset, 0, 0], angle);
+    add([0, -4, -.01], [5, 8, 1], [12, 10], [offset, 0, 0], -angle);
+    for (const phase of [.1, .9]) add([0, -4, 0], [5, 8, .005], [24, 10], [offset, 0, 0], angle * (1 - 2 * phase));
+    return { parts: [{ x: 0, y: lectern ? (facingY + 270) % 360 : 0, uvlock: false, elements }],
+      reason: lectern ? '讲台按 has_book 状态补充本地书本静止模型；文字可在 NBT 面板查看' : '附魔台补充本地书本的打开静止模型；未模拟玩家跟踪和翻页动画' };
   }
 
   const lang = Object.create(null);
@@ -517,6 +728,11 @@ function loadAssets(jarPath, palette, options = {}) {
       // subtracting the entire cube as if it were stone.
       if (/^minecraft:.*(?:_leaves|copper_grate)$/.test(name) || name === 'minecraft:mangrove_roots') result.fluidPorous = true;
     }
+    // These technical blocks are invisible in the normal game renderer. Their
+    // item icons are not solid block geometry, including when waterlogged.
+    if (name === 'minecraft:barrier' || name === 'minecraft:light') {
+      result.invisible = true; result.modelKind = 'invisible'; return result;
+    }
     if (name === 'minecraft:water' || name === 'minecraft:lava' || name === 'minecraft:bubble_column') {
       const liquid = name === 'minecraft:lava' ? 'lava' : 'water'; const level = Number(properties.level || 0);
       const height = name === 'minecraft:bubble_column' || level >= 8 ? 16 : Math.max(2, (8 - level) * 16 / 9);
@@ -542,8 +758,10 @@ function loadAssets(jarPath, palette, options = {}) {
       if (Array.isArray(blockstate.multipart)) for (const piece of blockstate.multipart) {
         if (conditionMatches(piece.when, properties)) definitions.push(chooseModel(piece.apply));
       }
+      let explicitEmpty = false;
       for (const definition of definitions.filter(Boolean)) {
         const data = model(definition.model);
+        if (Array.isArray(data.elements) && data.elements.length === 0) explicitEmpty = true;
         if (!particle && data.textures?.particle) particle = resolvedTexture(data.textures.particle, data.textures);
         const elements = elementsFor(data);
         if (elements.length) result.parts.push({ elements, x: [0, 90, 180, 270].includes(definition.x) ? definition.x : 0,
@@ -552,10 +770,23 @@ function loadAssets(jarPath, palette, options = {}) {
       }
       // Empty multipart is legitimate (e.g. a disconnected wall without a post).
       if (!definitions.length && Array.isArray(blockstate.multipart)) return result;
+      const supplement = entitySupplement(name, properties);
+      if (supplement) {
+        result.parts.push(...supplement.parts); result.modelKind = 'json-and-entity';
+        result.fallbackReason = supplement.reason; warn(`${name}: ${supplement.reason}`);
+      }
       if (result.parts.length) return result;
+      // Empty inherited JSON is intentional too (young pitcher-crop upper half).
+      // An absent elements field, conversely, may require a block entity model.
+      if (explicitEmpty || (name === 'minecraft:pitcher_crop' && properties.half === 'upper' &&
+          ['0', '1', '2'].includes(properties.age) && definitions.length)) {
+        result.modelKind = 'empty-json'; return result;
+      }
     } catch (error) { warn(`${name}: ${error.message}`); }
     const approximation = entityApproximation(name, properties, particle);
     result.parts = approximation.parts; result.fallback = true; result.fallbackReason = approximation.reason;
+    if (approximation.renderType) result.renderType = approximation.renderType;
+    result.modelKind = approximation.unsupported ? 'unsupported' : approximation.approximate ? 'approximate-entity' : 'static-entity';
     warn(`${name}: ${approximation.reason}`);
     return result;
   });
@@ -563,4 +794,5 @@ function loadAssets(jarPath, palette, options = {}) {
     gameDirectory: gameRoot, resourcePackPath: options.resourcePackPath ? path.resolve(options.resourcePackPath) : null }, warnings: [...warnings] };
 }
 
-module.exports = { discoverGameResources, loadAssets, _test: { resourceId, cleanZipPath, conditionMatches, variantMatches, defaultUv, parsePaletteEntry } };
+module.exports = { discoverGameResources, loadAssets, _test: { resourceId, cleanZipPath, conditionMatches, variantMatches,
+  defaultUv, parsePaletteEntry, entityUv, rawEntityUv, entityBox, poseMatrix, matrixMultiply } };
