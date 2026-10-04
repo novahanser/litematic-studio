@@ -204,6 +204,9 @@ async function createAtlas(assets, limit) {
       if (pixels[i] < 255) r.opaque = false;
       if (pixels[i] > 0 && pixels[i] < 255) r.translucent = true;
     }
+    // Keep only alpha for non-opaque tiles. Raycasting otherwise hits the
+    // invisible rectangles around chains, trapdoors, leaves and redstone.
+    if (!r.opaque) r.alpha = Uint8Array.from({ length: r.width * r.height }, (_, i) => pixels[i * 4 + 3]);
     // Duplicate edge texels into gutters to avoid dark seams at oblique angles.
     ctx.drawImage(canvas, r.x, r.y, r.width, 1, r.x, r.y - 1, r.width, 1);
     ctx.drawImage(canvas, r.x, r.y + r.height - 1, r.width, 1, r.x, r.y + r.height, r.width, 1);
@@ -216,7 +219,53 @@ async function createAtlas(assets, limit) {
   texture.minFilter = THREE.NearestFilter;
   texture.generateMipmaps = false;
   texture.needsUpdate = true;
-  return { texture, regions, width: size, height: size };
+  return { texture, regions, width: size, height: size, alphaReady: true };
+}
+
+/** Sample the same nearest-filtered atlas texel used by the block material.
+ * Alpha planes exclude the atlas's empty space and opaque tiles to keep CPU
+ * memory small even when a resource pack supplies large textures. */
+export function sampleAtlasAlpha(atlas, uv) {
+  if (!atlas?.alphaReady || !uv || !Number.isFinite(uv.x) || !Number.isFinite(uv.y)) return null;
+  const mapped = uv.clone();
+  if (atlas.texture) {
+    if (atlas.texture.matrixAutoUpdate) atlas.texture.updateMatrix();
+    atlas.texture.transformUv(mapped);
+  } else mapped.y = 1 - mapped.y;
+  const x = Math.min(atlas.width - 1, Math.max(0, Math.floor(mapped.x * atlas.width)));
+  const y = Math.min(atlas.height - 1, Math.max(0, Math.floor(mapped.y * atlas.height)));
+  for (const region of Object.values(atlas.regions)) {
+    // createAtlas duplicates one edge texel into each side's gutter. The four
+    // corners remain clear, exactly as they do in the rendered canvas.
+    const insideX = x >= region.x && x < region.x + region.width;
+    const insideY = y >= region.y && y < region.y + region.height;
+    if (!(insideX && y >= region.y - 1 && y <= region.y + region.height)
+      && !(insideY && x >= region.x - 1 && x <= region.x + region.width)) continue;
+    if (region.opaque) return 1;
+    const localX = Math.min(region.width - 1, Math.max(0, x - region.x));
+    const localY = Math.min(region.height - 1, Math.max(0, y - region.y));
+    return region.alpha[(localY * region.width) + localX] / 255;
+  }
+  return 0;
+}
+
+/** Raycaster tests geometry, while the GPU discards pixels below alphaTest. */
+export function atlasHitVisible(hit, atlas) {
+  const material = Array.isArray(hit.object.material) ? hit.object.material[hit.face?.materialIndex || 0] : hit.object.material;
+  if (!material || material.visible === false) return false;
+  if (!atlas || material.map !== atlas.texture) return true;
+  const alpha = sampleAtlasAlpha(atlas, hit.uv);
+  if (alpha == null) return true;
+  const effectiveAlpha = alpha * material.opacity;
+  return effectiveAlpha >= material.alphaTest && (!material.transparent || effectiveAlpha > 0);
+}
+
+export function createBlockMaterial(atlas, transparent = false) {
+  // Minecraft model faces are directional. Some redstone models deliberately
+  // face luminous quads inward; DoubleSide exposes them as solid red boxes.
+  // Models that need both sides already declare both face directions.
+  return new THREE.MeshLambertMaterial({ map: atlas.texture, vertexColors: true,
+    alphaTest: transparent ? 0.001 : 0.08, transparent, depthWrite: !transparent, side: THREE.FrontSide });
 }
 
 export function transparentState(block, asset, geometry) {
@@ -507,7 +556,7 @@ export class SchematicViewer {
       const transparent = transparentState(block, asset, geometry);
       this.stateGeometries.set(state, geometry);
       if (transparent) continue;
-      const material = new THREE.MeshLambertMaterial({ map: atlas.texture, vertexColors: true, alphaTest: 0.08, depthWrite: true, side: THREE.DoubleSide });
+      const material = createBlockMaterial(atlas);
       const mesh = new THREE.InstancedMesh(geometry, material, count);
       mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       mesh.userData.blockIndices = [];
@@ -567,7 +616,7 @@ export class SchematicViewer {
       geometry.userData.waterFaces = water.index.count / 6;
       base.dispose(); water.dispose();
     }
-    const material = new THREE.MeshLambertMaterial({ map: this.atlas.texture, vertexColors: true, alphaTest: 0.001, transparent: true, depthWrite: false, side: THREE.FrontSide });
+    const material = createBlockMaterial(this.atlas, true);
     const mesh = new THREE.Mesh(geometry, material);
     mesh.visible = geometry.index.count > 0;
     mesh.userData.transparentBatch = true;
@@ -706,6 +755,7 @@ export class SchematicViewer {
     const hits = this.raycaster.intersectObjects(this.meshes.filter(m => m.visible), false);
     let blockHit = null;
     for (const hit of hits) {
+      if (!atlasHitVisible(hit, this.atlas)) continue;
       const geometry = hit.object.geometry;
       const index = hit.object.isInstancedMesh ? hit.object.userData.blockIndices[hit.instanceId]
         : geometry.userData.blockIndices?.[geometry.userData.faceOrder?.[Math.floor(hit.faceIndex / 2)]];

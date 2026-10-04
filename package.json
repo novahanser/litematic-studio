@@ -1,6 +1,6 @@
 {
   "name": "litematic-studio",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Offline Litematic 3D inspector with local Minecraft resources",
   "main": "src/main.cjs",
   "type": "module",
@@ -15,7 +15,8 @@
     "test:renderer": "npm run build && node tests/v2-renderer-smoke.cjs",
     "test:portable": "node tests/portable-smoke.cjs",
     "dist": "npm run build && electron-builder --win portable --x64",
-    "test:display": "npm run build && node tests/v3-display-smoke.cjs"
+    "test:display": "npm run build && node tests/v3-display-smoke.cjs",
+    "test:materials": "npm run build && node tests/v4-material-smoke.cjs"
   },
   "dependencies": {
     "adm-zip": "0.6.1"

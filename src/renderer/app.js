@@ -19,7 +19,11 @@ function iconHtml(id){const src=iconFor(id);return src?`<img class="swatch" src=
 function showTab(name){document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));document.querySelectorAll('.tab-content').forEach(el=>el.classList.toggle('active',el.id==='tab-'+name));}
 async function accept(result,{preserveView=false}={}){
   if(!result)return;
-  const cameraState=preserveView&&viewer?{position:viewer.camera.position.clone(),target:viewer.controls.target.clone(),zoom:viewer.camera.zoom}:null;
+  const cameraState=preserveView&&viewer?{position:viewer.camera.position.clone(),target:viewer.controls.target.clone(),up:viewer.camera.up.clone(),zoom:viewer.camera.zoom,orthoHeight:viewer.orthoHeight,near:viewer.camera.near,far:viewer.camera.far}:null;
+  // Array indices may shift after a replacement removes blocks. Region-local
+  // identities survive rebuilding the resource meshes and undo/redo.
+  const selectedBlock=preserveView&&selected!=null?data?.blocks[selected]:null;
+  const selectedObject=preserveView&&selectedEntity!=null?data?.entities[selectedEntity]:null;
   const previousNames=new Set(allNames),previousSelected=new Set(selectedNames),previousY={single:$('single-y').value,min:$('range-min').value,max:$('range-max').value,custom:$('custom-layers').value};
   $('loading-text').textContent='正在构建 3D 模型…';await new Promise(r=>setTimeout(r,30));
   if(viewer) await viewer.setData(result.schematic,result.assets);
@@ -36,8 +40,11 @@ async function accept(result,{preserveView=false}={}){
   updatePropertyKeys();
   if(preserveView){selectedNames=new Set(allNames.filter(n=>previousSelected.has(n)||!previousNames.has(n)));$('single-y').value=previousY.single;$('range-min').value=previousY.min;$('range-max').value=previousY.max;$('custom-layers').value=previousY.custom;applyFilters();}
   else resetFilters();
-  if(cameraState&&viewer){viewer.camera.position.copy(cameraState.position);viewer.controls.target.copy(cameraState.target);viewer.camera.zoom=cameraState.zoom;viewer.camera.updateProjectionMatrix();viewer.controls.update();viewer.invalidate();}
-  inspect(null);$('entity-inspector').innerHTML='';updateResourceUI();
+  if(cameraState&&viewer){viewer.stopInertia();viewer.camera.position.copy(cameraState.position);viewer.controls.target.copy(cameraState.target);viewer.camera.up.copy(cameraState.up);viewer.camera.zoom=cameraState.zoom;viewer.orthoHeight=cameraState.orthoHeight;viewer.camera.near=cameraState.near;viewer.camera.far=Math.max(cameraState.far,viewer.camera.far);viewer.resize();viewer.controls.update();viewer.invalidate();}
+  inspect(null);$('entity-inspector').innerHTML='';
+  if(selectedBlock){const index=data.blocks.findIndex(b=>b.region===selectedBlock.region&&b.localIndex===selectedBlock.localIndex);if(index>=0)inspect(index);}
+  else if(selectedObject){const index=data.entities.findIndex(e=>e.region===selectedObject.region&&e.localIndex===selectedObject.localIndex);if(index>=0){inspectEntity(index);if(viewer)viewer.selectedEntityIndex=index;}}
+  updateResourceUI();
   const nbtCount=data.blocks.filter(b=>b.nbt!=null).length;
   $('status').textContent=`已载入 ${num(data.blocks.length)} 个方块 · ${allNames.length} 种 · ${num(nbtCount)} 条方块 NBT`;
   $('resource-status').textContent=assets.source ? `材质：Minecraft ${assets.source.version}${assets.source.resourcePackPath?' + 资源包':''}`:'未配置材质 · 打开材质设置';
@@ -91,6 +98,8 @@ function inspect(index,selectInViewer=true){
   $('selection-badge').hidden=false;$('selection-badge').textContent=`${label(s.Name)} · ${b.x}, ${b.y}, ${b.z}${visibleSet.has(index)?'':' · 已被筛选隐藏'}`;
   let html=`<h2 class="block-title">${escapeHtml(label(s.Name))}</h2><div class="block-id">${escapeHtml(s.Name)}</div><div class="position-line"><span>X ${b.x}</span><span>Y ${b.y}</span><span>Z ${b.z}</span></div><div class="section-label">状态属性</div><div class="property-list">${Object.entries(s.Properties||{}).map(([k,v])=>`<div class="property-row"><span>${escapeHtml(k)}</span><span>${escapeHtml(v)}</span></div>`).join('')||'<p class="hint">此方块没有额外状态属性。</p>'}</div><div class="property-row"><span>区域</span><span>${escapeHtml(typeof b.region==='number'?data.regions[b.region]?.name:b.region)}</span></div><button id="focus-selected" class="secondary wide">聚焦此方块</button>`;
   if(!visibleSet.has(index))html+='<p class="hint">此方块当前被筛选隐藏。可重置筛选后查看。</p>';
+  const renderAsset=assets?.blocks?.[b.state];
+  if(renderAsset?.resourceName&&renderAsset.resourceName!==s.Name)html+=`<div class="inspect-section"><div class="section-label">显示资源</div><div class="block-id">${escapeHtml(renderAsset.resourceName)}</div><p class="hint">使用兼容的资源名称显示；投影中的方块 ID 保持不变。</p></div>`;
   if(container){html+=`<div class="inspect-section"><div class="section-label">容器内容</div><span class="status-pill ${container.status}">${statusNames[container.status]}</span><p class="hint">${escapeHtml(container.reason||`${container.occupiedSlots} 个有物品槽位 · 共 ${num(container.itemCount)} 件物品`)}</p>${container.lootTable?`<div class="block-id">${escapeHtml(container.lootTable)}</div>`:''}${container.items.map(item=>`<div class="item-row"><span>槽 ${item.slot}</span><strong title="${escapeHtml(item.id)}">${escapeHtml(label(item.id))}</strong><em>×${num(item.count)}</em></div>`).join('')}</div>`;}
   html+=`<div class="inspect-section"><div class="section-label"><span>方块实体 NBT</span>${b.nbt!=null?'<button id="export-nbt" class="text-button">导出 JSON ↗</button>':''}</div>${b.nbt!=null?`<p class="hint">完整值保留；Long 以十进制字符串表示，原标签类型见下方。</p><pre class="nbt">${escapeHtml(JSON.stringify(b.nbt,null,2))}</pre><details><summary>查看原始 NBT 标签类型</summary><pre class="nbt">${escapeHtml(JSON.stringify(b.nbtTypes,null,2))}</pre></details>`:'<p class="hint">投影未记录此方块的方块实体 NBT。方块状态已显示在上方。</p>'}</div>`;
   $('inspector').innerHTML=html;

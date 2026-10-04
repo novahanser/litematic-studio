@@ -14,6 +14,13 @@ const LIMITS = Object.freeze({ archive: 768 * 1024 * 1024, entries: 200000,
 const DIRECTIONS = ['down', 'up', 'north', 'south', 'west', 'east'];
 const AIR = new Set(['minecraft:air', 'minecraft:cave_air', 'minecraft:void_air', 'minecraft:structure_void']);
 const MISSING = 'viewer:missing';
+// Minecraft 25w35a / 1.21.9 renamed the block, model and sprite IDs. This is a
+// resource lookup compatibility map only: never rewrite the schematic palette.
+// https://www.minecraft.net/en-us/article/minecraft-snapshot-25w35a
+const RESOURCE_RENAMES = new Map([
+  ['minecraft:chain', 'minecraft:iron_chain'], ['minecraft:iron_chain', 'minecraft:chain'],
+  ['minecraft:block/chain', 'minecraft:block/iron_chain'], ['minecraft:block/iron_chain', 'minecraft:block/chain'],
+]);
 
 function cleanZipPath(value) {
   if (typeof value !== 'string' || value.length > 1024 || value.includes('\\') ||
@@ -244,6 +251,11 @@ function loadAssets(jarPath, palette, options = {}) {
   if (!base.has('assets/minecraft/blockstates/stone.json')) throw new Error('此 JAR 不包含完整的 Minecraft 客户端方块资源，请选择游戏客户端 JAR');
   const archives = [base];
   if (options.resourcePackPath) archives.unshift(new ResourceArchive(options.resourcePackPath, budget));
+  function compatibleResourceId(id, kind, extension) {
+    const replacement = RESOURCE_RENAMES.get(id);
+    if (!replacement || archives.some(archive => archive.has(resourcePath(id, kind, extension)))) return id;
+    return archives.some(archive => archive.has(resourcePath(replacement, kind, extension))) ? replacement : id;
+  }
   const jsonCache = new Map();
   function readResource(name, maximum) {
     for (const archive of archives) if (archive.has(name)) return archive.read(name, maximum);
@@ -259,6 +271,7 @@ function loadAssets(jarPath, palette, options = {}) {
   const fluids = Object.create(null);
   function texture(id) {
     try { id = resourceId(id); } catch { id = MISSING; }
+    id = compatibleResourceId(id, 'textures', 'png');
     if (textures[id]) return id;
     if (id !== MISSING) {
       const filename = resourcePath(id, 'textures', 'png');
@@ -297,7 +310,7 @@ function loadAssets(jarPath, palette, options = {}) {
   }
   const modelCache = new Map();
   function model(id, trail = []) {
-    id = resourceId(id);
+    id = compatibleResourceId(resourceId(id), 'models', 'json');
     if (modelCache.has(id)) return modelCache.get(id);
     if (trail.includes(id) || trail.length >= LIMITS.inheritance) throw new Error(`模型继承循环或过深: ${id}`);
     const own = json(resourcePath(id, 'models', 'json'));
@@ -472,6 +485,15 @@ function loadAssets(jarPath, palette, options = {}) {
   }
   const chineseFound = loadIndexedChinese();
   mergeLanguage(json('assets/minecraft/lang/zh_cn.json'));
+  // The UI and material list use the original schematic IDs for their labels.
+  // Fill only absent translation keys; explicit resource-pack names win.
+  for (const [id, replacement] of RESOURCE_RENAMES) {
+    if (id.includes('/')) continue;
+    for (const kind of ['block', 'item']) {
+      const key = `${kind}.${id.replace(':', '.')}`, replacementKey = `${kind}.${replacement.replace(':', '.')}`;
+      if (!Object.hasOwn(lang, key) && Object.hasOwn(lang, replacementKey)) lang[key] = lang[replacementKey];
+    }
+  }
   if (!chineseFound && !json('assets/minecraft/lang/zh_cn.json')) warn('本地未找到简体中文语言包，缺失名称使用英文或方块 ID');
   const blocks = palette.map(entry => {
     let state;
@@ -480,8 +502,13 @@ function loadAssets(jarPath, palette, options = {}) {
       return { name: String(entry?.Name || entry?.name || entry), label: '无效方块', parts: [], fallback: true };
     }
     const { name, properties } = state;
+    const resourceName = compatibleResourceId(name, 'blockstates', 'json');
     const translationKey = `block.${name.replace(':', '.').replace(/\//g, '.')}`;
     const result = { name, properties, label: lang[translationKey] || lang[translationKey.replace(/^block\./, 'item.')] || name, parts: [] };
+    if (resourceName !== name) {
+      result.resourceName = resourceName;
+      warn(`${name}: 使用本地 ${resourceName} 资源（版本改名兼容，保留投影原方块 ID）`);
+    }
     if (AIR.has(name)) return result;
     if (properties.waterlogged === 'true') {
       result.waterlogged = true; ensureWaterResources();
@@ -505,7 +532,7 @@ function loadAssets(jarPath, palette, options = {}) {
     }
     let particle;
     try {
-      const blockstate = json(resourcePath(name, 'blockstates', 'json'));
+      const blockstate = json(resourcePath(resourceName, 'blockstates', 'json'));
       if (!blockstate) throw new Error(`缺失本地方块状态: ${name}`);
       const definitions = [];
       if (blockstate.variants && typeof blockstate.variants === 'object') {

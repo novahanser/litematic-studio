@@ -84,6 +84,77 @@ test('resource pack overrides game textures without changing transparent PNG byt
   assert.equal(assets.source.resourcePackPath, packPath);
 });
 
+function chainEntries(id, textureId = id) {
+  return {
+    [`assets/minecraft/blockstates/${id}.json`]: { variants: {
+      'axis=x': { model: `minecraft:block/${id}`, x: 90, y: 90 },
+      'axis=y': { model: `minecraft:block/${id}` },
+      'axis=z': { model: `minecraft:block/${id}`, x: 90 },
+    } },
+    [`assets/minecraft/models/block/${id}.json`]: { textures: { chain: `minecraft:block/${textureId}` },
+      elements: [{ from: [7, 0, 7], to: [9, 16, 9], faces: { north: { texture: '#chain', uv: [0, 0, 2, 16] } } }] },
+    [texturePath(id)]: PNG,
+  };
+}
+
+test('renamed chain resources preserve schematic IDs, properties, orientation and local labels', t => {
+  const { jar, game } = createFixture(t, { ...chainEntries('iron_chain'),
+    'assets/minecraft/lang/zh_cn.json': { 'block.minecraft.iron_chain': '铁链', 'item.minecraft.iron_chain': '铁链物品' },
+  });
+  // Isolate translation fallback from any language indexes installed on this PC.
+  const hash = '1'.repeat(40);
+  fs.mkdirSync(path.join(game, 'assets', 'indexes'), { recursive: true });
+  fs.mkdirSync(path.join(game, 'assets', 'objects', '11'), { recursive: true });
+  fs.writeFileSync(path.join(game, 'assets', 'indexes', 'fixture.json'), JSON.stringify({ objects: { 'minecraft/lang/zh_cn.json': { hash } } }));
+  fs.writeFileSync(path.join(game, 'assets', 'objects', '11', hash), JSON.stringify({ 'block.minecraft.iron_chain': '铁链' }));
+  const palette = ['x', 'y', 'z'].map(axis => ({ Name: 'minecraft:chain', Properties: { axis, waterlogged: 'false' } }));
+  const unchanged = JSON.stringify(palette);
+  const assets = loadAssets(jar, palette);
+  assert.equal(JSON.stringify(palette), unchanged, 'resource compatibility must not migrate the editable/exported palette');
+  assets.blocks.forEach((block, index) => {
+    assert.equal(block.name, 'minecraft:chain');
+    assert.deepEqual({ ...block.properties }, palette[index].Properties);
+    assert.equal(block.resourceName, 'minecraft:iron_chain');
+    assert.equal(block.label, '铁链');
+    assert.equal(block.fallback, undefined);
+    assert.deepEqual(block.parts[0].elements[0].from, [7, 0, 7]);
+    assert.equal(block.parts[0].elements[0].faces.north.texture, 'minecraft:block/iron_chain');
+  });
+  assert.deepEqual(assets.blocks.map(block => [block.parts[0].x, block.parts[0].y]), [[90, 90], [0, 0], [90, 0]]);
+  assert.equal(assets.lang['block.minecraft.chain'], '铁链');
+  assert.equal(assets.lang['item.minecraft.chain'], '铁链物品');
+  assert.equal(assets.textures['viewer:missing'], undefined);
+  assert(assets.warnings.some(w => w.includes('版本改名兼容')));
+});
+
+test('resource rename lookup works with older jars and never replaces an existing exact resource', t => {
+  const old = createFixture(t, chainEntries('chain'));
+  const reverse = loadAssets(old.jar, ['minecraft:iron_chain[axis=z]']).blocks[0];
+  assert.equal(reverse.name, 'minecraft:iron_chain');
+  assert.equal(reverse.resourceName, 'minecraft:chain');
+  assert.equal(reverse.parts[0].elements[0].faces.north.texture, 'minecraft:block/chain');
+  const both = createFixture(t, { ...chainEntries('chain'), ...chainEntries('iron_chain'),
+    'assets/minecraft/lang/zh_cn.json': { 'block.minecraft.chain': '资源包指定名称', 'block.minecraft.iron_chain': '铁链' },
+  });
+  const exact = loadAssets(both.jar, ['minecraft:chain[axis=y]']).blocks[0];
+  assert.equal(exact.resourceName, undefined);
+  assert.equal(exact.parts[0].elements[0].faces.north.texture, 'minecraft:block/chain');
+  assert.equal(exact.label, '资源包指定名称');
+});
+
+test('legacy resource-pack model and sprite references resolve only known missing renamed IDs', t => {
+  const { jar } = createFixture(t, {
+    ...chainEntries('iron_chain', 'chain'),
+    'assets/minecraft/blockstates/chain.json': { variants: { 'axis=y': { model: 'minecraft:block/chain' } } },
+  });
+  const assets = loadAssets(jar, ['minecraft:chain[axis=y]', 'example:chain[axis=y]']);
+  assert.equal(assets.blocks[0].resourceName, undefined, 'the original blockstate still wins');
+  assert.equal(assets.blocks[0].fallback, undefined);
+  assert.equal(assets.blocks[0].parts[0].elements[0].faces.north.texture, 'minecraft:block/iron_chain');
+  assert.equal(assets.blocks[1].resourceName, undefined, 'mod IDs must not be redirected to vanilla chains');
+  assert.equal(assets.blocks[1].fallback, true);
+});
+
 test('reads local indexed Chinese language resources from the selected game root', t => {
   const { jar, game } = createFixture(t);
   const hash = '0123456789abcdef0123456789abcdef01234567';
@@ -303,4 +374,34 @@ test('optional real game entity sheets support oriented shulkers, beds, and both
   assert.deepEqual(transformedAxis(assets.blocks[2].parts[0], [0,0,-1]), [0,1,0]);
   assert.deepEqual(assets.blocks[6].parts[0].elements[0].faces.up.uv, [1.5,1.5,5.5,5.5]);
   assert.equal(assets.fluids.water.still, 'minecraft:block/water_still');
+});
+
+test('optional real game legacy chains use the native iron-chain mesh and all three axis rotations', { skip: !localJar || !fs.existsSync(localJar) }, () => {
+  const palette = ['chain', 'iron_chain'].flatMap(name => ['x', 'y', 'z'].map(axis => `minecraft:${name}[axis=${axis},waterlogged=false]`));
+  const assets = loadAssets(localJar, palette);
+  for (let axis = 0; axis < 3; axis++) {
+    assert.equal(assets.blocks[axis].fallback, undefined);
+    assert.deepEqual(assets.blocks[axis].parts, assets.blocks[axis + 3].parts);
+    assert.equal(assets.blocks[axis].name, 'minecraft:chain');
+  }
+  assert.equal(assets.textures['viewer:missing'], undefined);
+});
+
+const localSample = process.env.LITEMATIC_SAMPLE;
+test('optional regression sample has no missing face textures or atlas-escaping UVs', {
+  skip: !localJar || !localSample || !fs.existsSync(localJar) || !fs.existsSync(localSample),
+}, () => {
+  const { parseLitematic } = require('../src/core/litematic.cjs');
+  const schematic = parseLitematic(fs.readFileSync(localSample));
+  const originalPalette = JSON.stringify(schematic.palette);
+  const assets = loadAssets(localJar, schematic.palette, { resourcePackPath: process.env.MINECRAFT_RESOURCE_PACK || undefined });
+  for (const [index, block] of assets.blocks.entries()) for (const part of block.parts) for (const element of part.elements) {
+    for (const [direction, face] of Object.entries(element.faces)) {
+      const context = `${index} ${block.name} ${direction}`;
+      assert.notEqual(face.texture, 'viewer:missing', context);
+      assert.ok(assets.textures[face.texture], `${context}: texture data must exist`);
+      assert.ok(face.uv.every(value => Number.isFinite(value) && value >= 0 && value <= 16), `${context}: ${face.uv}`);
+    }
+  }
+  assert.equal(JSON.stringify(schematic.palette), originalPalette);
 });
