@@ -672,9 +672,17 @@ function loadAssets(jarPath, palette, options = {}) {
       reason: lectern ? '讲台按 has_book 状态补充本地书本静止模型；文字可在 NBT 面板查看' : '附魔台补充本地书本的打开静止模型；未模拟玩家跟踪和翻页动画' };
   }
 
-  const lang = Object.create(null);
-  function mergeLanguage(value) { if (value) for (const [key, text] of Object.entries(value)) if (typeof text === 'string') lang[key] = text; }
-  mergeLanguage(json('assets/minecraft/lang/en_us.json'));
+  const langs = { en_us: Object.create(null), zh_cn: Object.create(null) };
+  function mergeLanguage(locale, value) { if (value && typeof value === 'object' && !Array.isArray(value)) for (const [key, text] of Object.entries(value)) if (typeof text === 'string') langs[locale][key] = text; }
+  // Language files merge per key, unlike model JSON overrides. Keep each
+  // locale independent so a partial Chinese pack cannot overwrite English.
+  function mergeArchiveLanguages(locale) {
+    for (const archive of [...archives].reverse()) {
+      const filename = `assets/minecraft/lang/${locale}.json`;
+      if (archive.has(filename)) mergeLanguage(locale, readJson(archive.read(filename, LIMITS.json), filename));
+    }
+  }
+  mergeArchiveLanguages('en_us');
   const gameRoot = findGameRoot(jarPath);
   const launcherVersion = localJson(path.join(path.dirname(jarPath), `${path.basename(jarPath, path.extname(jarPath))}.json`));
   function loadIndexedChinese() {
@@ -689,23 +697,24 @@ function loadAssets(jarPath, palette, options = {}) {
         const hash = index?.objects?.['minecraft/lang/zh_cn.json']?.hash;
         if (!/^[a-f0-9]{40}$/.test(hash || '')) continue;
         const language = localJson(path.join(root, 'assets', 'objects', hash.slice(0, 2), hash));
-        if (language) { mergeLanguage(language); return true; }
+        if (language) { mergeLanguage('zh_cn', language); return true; }
       }
     }
     return false;
   }
   const chineseFound = loadIndexedChinese();
-  mergeLanguage(json('assets/minecraft/lang/zh_cn.json'));
+  mergeArchiveLanguages('zh_cn');
   // The UI and material list use the original schematic IDs for their labels.
   // Fill only absent translation keys; explicit resource-pack names win.
   for (const [id, replacement] of RESOURCE_RENAMES) {
     if (id.includes('/')) continue;
     for (const kind of ['block', 'item']) {
       const key = `${kind}.${id.replace(':', '.')}`, replacementKey = `${kind}.${replacement.replace(':', '.')}`;
-      if (!Object.hasOwn(lang, key) && Object.hasOwn(lang, replacementKey)) lang[key] = lang[replacementKey];
+      for (const lang of Object.values(langs)) if (!Object.hasOwn(lang, key) && Object.hasOwn(lang, replacementKey)) lang[key] = lang[replacementKey];
     }
   }
   if (!chineseFound && !json('assets/minecraft/lang/zh_cn.json')) warn('本地未找到简体中文语言包，缺失名称使用英文或方块 ID');
+  const lang = Object.assign(Object.create(null), langs.en_us, langs.zh_cn);
   const blocks = palette.map(entry => {
     let state;
     try { state = parsePaletteEntry(entry); } catch (error) {
@@ -790,7 +799,7 @@ function loadAssets(jarPath, palette, options = {}) {
     warn(`${name}: ${approximation.reason}`);
     return result;
   });
-  return { blocks, textures, textureMeta, fluids, lang, source: { path: path.resolve(jarPath), version: metadata.id || path.basename(jarPath, '.jar'),
+  return { blocks, textures, textureMeta, fluids, lang, langs, source: { path: path.resolve(jarPath), version: metadata.id || path.basename(jarPath, '.jar'),
     gameDirectory: gameRoot, resourcePackPath: options.resourcePackPath ? path.resolve(options.resourcePackPath) : null }, warnings: [...warnings] };
 }
 

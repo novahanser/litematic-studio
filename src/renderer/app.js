@@ -1,19 +1,27 @@
 import {SchematicViewer} from './viewer.js';
 import {EntityPreviewLayer} from './entity-view.js';
 import {parseLayers,buildMaterialRows,stacks64,csvCell,matchesSpecial} from '../core/view-model.cjs';
+import {normalizeLocale,translate,gameLabel,matchesGameName} from '../core/i18n.cjs';
+import {localizeTree,observeTranslations} from './i18n.js';
+import './i18n.css';
+import {mountContainerView} from './container-view.js';
+import {buildContainerLayout} from '../core/container-layout.cjs';
 const $=id=>document.getElementById(id);
 const escapeHtml=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const num=value=>Number(value||0).toLocaleString('zh-CN');
+let locale='zh_cn';
+const t=text=>translate(text,locale);
+const num=value=>Number(value||0).toLocaleString(locale==='en_us'?'en-US':'zh-CN');
 const statusNames={filled:'有物品',empty:'已记录为空',unknown:'未知 / 未记录',loot:'待生成战利品'};
 let data=null,assets=null,config={},filePath='',selected=null,visible=[],visibleSet=new Set(),selectedNames=new Set(),allNames=[],layerMode='all',customLayers=null,materialRows=[],busy=false,grid=true,toastTimer,filterTimer;
 let entityAssets=null,entityLayer=null,selectedEntity=null,documentInfo={},catalog=[],visibleEntities=[];
+let containerAssets=null,containerController=null,selectedSlot=null;
 let viewer;
 try {viewer=new SchematicViewer($('viewport'),{onSelect:(_block,index)=>{selectedEntity=null;inspect(index);if(index!=null)showTab('inspect');},onSelectEntity:(_entity,index)=>{inspectEntity(index);showTab('entities');},onProjectionChange:projection=>{$('projection-toggle').textContent=projection==='orthographic'?'正交':'透视';},onStats:s=>{$('render-stats').textContent=`${num(s.meshes)} 批次 · ${num(s.triangles)} 三角形`;}});}catch(error){$('status').textContent='3D 初始化失败：'+error.message;toast('无法创建 3D 视图：'+error.message);}
 function toast(message){clearTimeout(toastTimer);$('toast').textContent=message;$('toast').hidden=false;toastTimer=setTimeout(()=>$('toast').hidden=true,6000);}
 function setBusy(value,text='正在读取…'){busy=value;$('loading').hidden=!value;$('loading-text').textContent=text;$('open-button').disabled=value;$('welcome-open').disabled=value;$('reload-resources').disabled=value;updateDocumentUI();}
-function label(id){const key=id.replace(':','.');return assets?.lang?.['block.'+key]||assets?.lang?.['item.'+key]||id.replace(/^minecraft:/,'');}
+function label(id,kind='block'){return gameLabel(assets,id,locale,kind);}
 function stateName(index){return data.palette[data.blocks[index].state].Name;}
-function nameMatches(id,search){return !search||id.toLowerCase().includes(search)||label(id).toLowerCase().includes(search);}
+function nameMatches(id,search,kind='block'){return matchesGameName(assets,id,search,kind);}
 function iconFor(id){const state=data?.palette.findIndex(x=>x.Name===id);const a=assets?.blocks?.[state];for(const part of a?.parts||[])for(const element of part.elements||[])for(const face of Object.values(element.faces||{})){const img=assets?.textures?.[face.texture];if(img)return img;}return '';}
 function iconHtml(id){const src=iconFor(id);return src?`<img class="swatch" src="${escapeHtml(src)}" alt="">`:'<span class="swatch"></span>';}
 function showTab(name){document.querySelectorAll('[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));document.querySelectorAll('.tab-content').forEach(el=>el.classList.toggle('active',el.id==='tab-'+name));}
@@ -28,8 +36,9 @@ async function accept(result,{preserveView=false}={}){
   $('loading-text').textContent='正在构建 3D 模型…';await new Promise(r=>setTimeout(r,30));
   if(viewer) await viewer.setData(result.schematic,result.assets);
   data=result.schematic;assets=result.assets;filePath=result.filePath;selected=null;selectedNames=new Set(data.palette.map(s=>s.Name));allNames=[...new Set(data.blocks.map(b=>data.palette[b.state].Name))].sort((a,b)=>(data.counts.byName[b]||0)-(data.counts.byName[a]||0));
+  containerController?.destroy();containerController=null;selectedSlot=null;containerAssets=result.containerAssets||{items:{},textures:{},gui:{},warnings:[]};
   documentInfo=result.document||{};entityAssets=result.entityAssets||{textures:{},entities:[]};selectedEntity=null;
-  entityLayer=new EntityPreviewLayer(data.entities||[],entityAssets,{onChange:()=>viewer?.invalidate()});await entityLayer.ready;viewer?.setEntityLayer(entityLayer);
+  entityLayer=new EntityPreviewLayer(data.entities||[],entityAssets,{onChange:()=>viewer?.invalidate()});await entityLayer.ready;entityLayer.setLabels(entityLabel,locale==='en_us'?'Approximate bounds':'近似边界');viewer?.setEntityLayer(entityLayer);
   const min=data.bounds.min,max=data.bounds.max;
   for(const id of ['single-y','range-min','range-max','layer-slider']){$(id).min=min.y;$(id).max=max.y;}
   $('single-y').value=$('range-min').value=$('layer-slider').value=min.y;$('range-max').value=max.y;$('custom-layers').value=String(min.y);customLayers=new Set([min.y]);
@@ -48,7 +57,7 @@ async function accept(result,{preserveView=false}={}){
   const nbtCount=data.blocks.filter(b=>b.nbt!=null).length;
   $('status').textContent=`已载入 ${num(data.blocks.length)} 个方块 · ${allNames.length} 种 · ${num(nbtCount)} 条方块 NBT`;
   $('resource-status').textContent=assets.source ? `材质：Minecraft ${assets.source.version}${assets.source.resourcePackPath?' + 资源包':''}`:'未配置材质 · 打开材质设置';
-  const warnings=[...(data.warnings||[]),...(assets.warnings||[]),...(entityAssets.warnings||[])];
+  const warnings=[...(data.warnings||[]),...(assets.warnings||[]),...(entityAssets.warnings||[]),...(containerAssets?.warnings||[])];
   if(warnings.length)toast(`投影已载入，${warnings.length} 条模型或文件提示可在「材质设置」查看。`);
 }
 async function performLoad(action,options){if(busy)return;setBusy(true);try{const result=await action();await accept(result,options);return result;}catch(error){$('status').textContent='打开失败：'+error.message;toast(error.message);}finally{setBusy(false);}}
@@ -96,22 +105,23 @@ function inspect(index,selectInViewer=true){
   if(selectInViewer)viewer?.select(index);
   for(const a of ['x','y','z'])$('jump-'+a).value=b[a];
   $('selection-badge').hidden=false;$('selection-badge').textContent=`${label(s.Name)} · ${b.x}, ${b.y}, ${b.z}${visibleSet.has(index)?'':' · 已被筛选隐藏'}`;
-  let html=`<h2 class="block-title">${escapeHtml(label(s.Name))}</h2><div class="block-id">${escapeHtml(s.Name)}</div><div class="position-line"><span>X ${b.x}</span><span>Y ${b.y}</span><span>Z ${b.z}</span></div><div class="section-label">状态属性</div><div class="property-list">${Object.entries(s.Properties||{}).map(([k,v])=>`<div class="property-row"><span>${escapeHtml(k)}</span><span>${escapeHtml(v)}</span></div>`).join('')||'<p class="hint">此方块没有额外状态属性。</p>'}</div><div class="property-row"><span>区域</span><span>${escapeHtml(typeof b.region==='number'?data.regions[b.region]?.name:b.region)}</span></div><button id="focus-selected" class="secondary wide">聚焦此方块</button>`;
+  let html=`<h2 class="block-title">${escapeHtml(label(s.Name))}</h2><div class="block-id">${escapeHtml(s.Name)}</div><div class="position-line"><span>X ${b.x}</span><span>Y ${b.y}</span><span>Z ${b.z}</span></div><div class="section-label">状态属性</div><div class="property-list">${Object.entries(s.Properties||{}).map(([k,v])=>`<div class="property-row" data-i18n-skip><span>${escapeHtml(k)}</span><span>${escapeHtml(v)}</span></div>`).join('')||'<p class="hint">此方块没有额外状态属性。</p>'}</div><div class="property-row"><span>区域</span><span data-i18n-skip>${escapeHtml(typeof b.region==='number'?data.regions[b.region]?.name:b.region)}</span></div><button id="focus-selected" class="secondary wide">聚焦此方块</button>`;
   if(!visibleSet.has(index))html+='<p class="hint">此方块当前被筛选隐藏。可重置筛选后查看。</p>';
   const renderAsset=assets?.blocks?.[b.state];
   if(renderAsset?.resourceName&&renderAsset.resourceName!==s.Name)html+=`<div class="inspect-section"><div class="section-label">显示资源</div><div class="block-id">${escapeHtml(renderAsset.resourceName)}</div><p class="hint">使用兼容的资源名称显示；投影中的方块 ID 保持不变。</p></div>`;
   if(renderAsset?.fallbackReason)html+=`<div class="inspect-section"><div class="section-label">预览说明</div><p class="hint">${escapeHtml(renderAsset.fallbackReason)}</p></div>`;
-  if(container){html+=`<div class="inspect-section"><div class="section-label">容器内容</div><span class="status-pill ${container.status}">${statusNames[container.status]}</span><p class="hint">${escapeHtml(container.reason||`${container.occupiedSlots} 个有物品槽位 · 共 ${num(container.itemCount)} 件物品`)}</p>${container.lootTable?`<div class="block-id">${escapeHtml(container.lootTable)}</div>`:''}${container.items.map(item=>`<div class="item-row"><span>槽 ${item.slot}</span><strong title="${escapeHtml(item.id)}">${escapeHtml(label(item.id))}</strong><em>×${num(item.count)}</em></div>`).join('')}</div>`;}
+  if(container)html+='<div id="container-view" data-i18n-skip></div>';
   html+=`<div class="inspect-section"><div class="section-label"><span>方块实体 NBT</span>${b.nbt!=null?'<button id="export-nbt" class="text-button">导出 JSON ↗</button>':''}</div>${b.nbt!=null?`<p class="hint">完整值保留；Long 以十进制字符串表示，原标签类型见下方。</p><pre class="nbt">${escapeHtml(JSON.stringify(b.nbt,null,2))}</pre><details><summary>查看原始 NBT 标签类型</summary><pre class="nbt">${escapeHtml(JSON.stringify(b.nbtTypes,null,2))}</pre></details>`:'<p class="hint">投影未记录此方块的方块实体 NBT。方块状态已显示在上方。</p>'}</div>`;
   $('inspector').innerHTML=html;
+  if(container){const layout=data.containers?.[index]||buildContainerLayout(data,index);containerController=mountContainerView($('container-view'),layout,{locale,label:id=>label(id,'item'),itemAssets:containerAssets,selectedSlot,onSelectSlot:slot=>{selectedSlot=slot;}});}
   $('focus-selected').onclick=()=>{viewer?.focus(index);if(!visibleSet.has(index))toast('该方块被当前筛选隐藏，可点击左侧「重置」。');};
   if($('export-nbt'))$('export-nbt').onclick=()=>saveExport({type:'json',name:`NBT_${b.x}_${b.y}_${b.z}`,content:JSON.stringify({position:{x:b.x,y:b.y,z:b.z},block:s,nbt:b.nbt,types:b.nbtTypes},null,2)});
 }
 function renderMaterials(){
   const scope=$('material-scope').value==='visible'?'visible':'total',query=$('material-search').value.trim().toLowerCase();
-  const rows=materialRows.filter(r=>r[scope]>0&&nameMatches(r.id,query));
+  const rows=materialRows.filter(r=>r[scope]>0&&nameMatches(r.id,query,'item'));
   $('material-summary').textContent=`${rows.length} 种材料 · ${num(rows.reduce((s,r)=>s+r[scope],0))} 件`;
-  $('material-list').innerHTML=rows.map(r=>`<div class="material-row"><div class="material-name"><div class="name">${escapeHtml(label(r.id))}</div><small>${escapeHtml(r.id)}</small></div><div class="quantity"><strong>${num(r[scope])}</strong><small>${stacks64(r[scope])}</small></div></div>`).join('')||'<p class="empty-small">当前范围没有材料</p>';
+  $('material-list').innerHTML=rows.map(r=>`<div class="material-row"><div class="material-name"><div class="name">${escapeHtml(label(r.id,'item'))}</div><small>${escapeHtml(r.id)}</small></div><div class="quantity"><strong>${num(r[scope])}</strong><small>${stacks64(r[scope])}</small></div></div>`).join('')||'<p class="empty-small">当前范围没有材料</p>';
 }
 let containerPageSize=180;
 function renderContainers(){
@@ -120,15 +130,15 @@ function renderContainers(){
   const filled=all.filter(i=>data.blocks[i].container.status==='filled').length;
   const rows=all.filter(i=>{const b=data.blocks[i];return (filter==='all'||b.container.status===filter)&&(nameMatches(stateName(i),q)||`${b.x},${b.y},${b.z}`.includes(q));});
   $('container-summary').textContent=`${num(all.length)} 个可存物方块 · ${filled} 个有物品`;
-  $('container-list').innerHTML=rows.slice(0,containerPageSize).map(i=>{const b=data.blocks[i],c=b.container;return `<button class="container-row" data-index="${i}"><b>${escapeHtml(label(stateName(i)))}</b><span class="status-pill ${c.status}">${statusNames[c.status]}</span><span class="item-count">${c.itemCount?num(c.itemCount)+' 件':''}</span><span class="position">X ${b.x} &nbsp; Y ${b.y} &nbsp; Z ${b.z}</span></button>`;}).join('')+(rows.length>containerPageSize?`<button id="more-containers" class="secondary wide">加载更多 (${num(rows.length-containerPageSize)})</button>`:'')||'<p class="empty-small">没有匹配的容器</p>';
+  $('container-list').innerHTML=rows.slice(0,containerPageSize).map(i=>{const b=data.blocks[i],c=b.container;return `<button class="container-row" data-index="${i}"><b data-i18n-skip>${escapeHtml(label(stateName(i)))}</b><span class="status-pill ${c.status}">${statusNames[c.status]}</span><span class="item-count">${c.itemCount?num(c.itemCount)+' 件':''}</span><span class="position">X ${b.x} &nbsp; Y ${b.y} &nbsp; Z ${b.z}</span></button>`;}).join('')+(rows.length>containerPageSize?`<button id="more-containers" class="secondary wide">加载更多 (${num(rows.length-containerPageSize)})</button>`:'')||'<p class="empty-small">没有匹配的容器</p>';
   if($('more-containers'))$('more-containers').onclick=()=>{containerPageSize+=180;renderContainers();};
 }
 async function saveExport(request){try{const dest=await window.desktop.saveExport(request);if(dest)toast('已导出：'+dest);}catch(error){toast('导出失败：'+error.message);}}
-function exportMaterials(){if(!data)return;const scope=$('material-scope').value==='visible'?'visible':'total';const rows=[['材料','物品ID','数量','整组(64)','余数','范围'],...materialRows.filter(r=>r[scope]>0).map(r=>[label(r.id),r.id,r[scope],Math.floor(r[scope]/64),r[scope]%64,scope==='visible'?'当前可见':'整个投影'])];saveExport({type:'csv',name:'材料列表_'+(scope==='visible'?'当前可见':'全部'),content:rows.map(r=>r.map(csvCell).join(',')).join('\r\n')});}
+function exportMaterials(){if(!data)return;const scope=$('material-scope').value==='visible'?'visible':'total';const rows=[['材料','物品ID','数量','整组(64)','余数','范围'].map(t),...materialRows.filter(r=>r[scope]>0).map(r=>[label(r.id,'item'),r.id,r[scope],Math.floor(r[scope]/64),r[scope]%64,t(scope==='visible'?'当前可见':'整个投影')])];saveExport({type:'csv',name:t('材料列表_'+(scope==='visible'?'当前可见':'全部')),content:rows.map(r=>r.map(csvCell).join(',')).join('\r\n')});}
 function updateResourceUI(){
   $('current-jar').textContent=config.jarPath||assets?.source?.path||'尚未选择';$('current-pack').textContent=config.resourcePackPath||'使用原版资源';
   const candidates=config.candidates||[];$('detected-jars').innerHTML=candidates.map((c,i)=>`<option value="${i}">${escapeHtml(c.version||c.path)}</option>`).join('')||'<option>没有自动检测到版本</option>';$('use-detected').disabled=!candidates.length;
-  const warnings=[...(data?.warnings||[]),...(assets?.warnings||[]),...(entityAssets?.warnings||[])];$('warnings-count').textContent=warnings.length;$('warnings-list').innerHTML=warnings.map(w=>`<li>${escapeHtml(w)}</li>`).join('')||'<li>暂无提示</li>';
+  const warnings=[...(data?.warnings||[]),...(assets?.warnings||[]),...(entityAssets?.warnings||[]),...(containerAssets?.warnings||[])];$('warnings-count').textContent=warnings.length;$('warnings-list').innerHTML=warnings.map(w=>`<li>${escapeHtml(w)}</li>`).join('')||'<li>暂无提示</li>';
 }
 function updateDocumentUI(){
   $('replace-button').disabled=!data||busy;$('save-document').disabled=!data||busy;$('undo-button').disabled=!documentInfo.canUndo||busy;$('redo-button').disabled=!documentInfo.canRedo||busy;
@@ -136,17 +146,19 @@ function updateDocumentUI(){
 }
 function updatePropertyKeys(){
   const previous=$('property-key').value,keys=[...new Set((data?.palette||[]).flatMap(s=>Object.keys(s.Properties||{})))].sort();
-  $('property-key').innerHTML='<option value="">不限属性</option>'+keys.map(k=>`<option value="${escapeHtml(k)}">${escapeHtml(k)}</option>`).join('');if(keys.includes(previous))$('property-key').value=previous;updatePropertyValues();
+  $('property-key').innerHTML='<option value="">不限属性</option>'+keys.map(k=>`<option data-i18n-skip value="${escapeHtml(k)}">${escapeHtml(k)}</option>`).join('');if(keys.includes(previous))$('property-key').value=previous;updatePropertyValues();
 }
-function updatePropertyValues(){const key=$('property-key').value,previous=$('property-value').value,values=[...new Set((data?.palette||[]).map(s=>s.Properties?.[key]).filter(v=>v!=null))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));$('property-value').innerHTML='<option value="">任意值</option>'+values.map(v=>`<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');if(values.includes(previous))$('property-value').value=previous;}
-function entityLabel(index){return entityAssets?.entities?.[index]?.label||assets?.lang?.['entity.'+data.entities[index].id.replace(':','.')]||data.entities[index].id;}
+function updatePropertyValues(){const key=$('property-key').value,previous=$('property-value').value,values=[...new Set((data?.palette||[]).map(s=>s.Properties?.[key]).filter(v=>v!=null))].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));$('property-value').innerHTML='<option value="">任意值</option>'+values.map(v=>`<option data-i18n-skip value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');if(values.includes(previous))$('property-value').value=previous;}
+function entityLabel(index){return label(data.entities[index].id,'entity');}
 function renderEntities(){
   if(!data)return;const q=$('entity-search').value.trim().toLowerCase();
   $('entity-summary').textContent=`${visibleEntities.length} / ${(data.entities||[]).length} 个实体`;
-  $('entity-list').innerHTML=visibleEntities.filter(i=>!q||entityLabel(i).toLowerCase().includes(q)||data.entities[i].id.includes(q)).map(i=>{const e=data.entities[i],p=e.position,position=p?`${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}`:'位置无效 · 可查看 NBT';return `<button class="entity-row ${selectedEntity===i?'active':''}" data-entity="${i}"><div>${escapeHtml(entityLabel(i))}<small>${position}</small></div><span>↗</span></button>`;}).join('')||'<p class="empty-small">投影中没有符合条件的已保存实体</p>';
+  $('entity-list').innerHTML=visibleEntities.filter(i=>nameMatches(data.entities[i].id,q,'entity')).map(i=>{const e=data.entities[i],p=e.position,position=p?`${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}`:'位置无效 · 可查看 NBT';return `<button class="entity-row ${selectedEntity===i?'active':''}" data-entity="${i}"><div><span data-i18n-skip>${escapeHtml(entityLabel(i))}</span><small>${position}</small></div><span>↗</span></button>`;}).join('')||'<p class="empty-small">投影中没有符合条件的已保存实体</p>';
 }
-function inspectEntity(index){
-  if(!data?.entities?.[index])return;selectedEntity=index;selected=null;viewer?.select(null);const e=data.entities[index],p=e.position;
+function inspectEntity(index,selectInViewer=true){
+  if(!data?.entities?.[index])return;
+  if(selectInViewer){inspect(null,false);viewer?.select(null);}
+  selectedEntity=index;selected=null;const e=data.entities[index],p=e.position;
   $('selection-badge').hidden=false;$('selection-badge').textContent=`${entityLabel(index)} · ${p?`${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}`:'位置无效，仅查看 NBT'}`;
   $('entity-inspector').innerHTML=`<div class="inspect-section"><h2 class="block-title">${escapeHtml(entityLabel(index))}</h2><div class="block-id">${escapeHtml(e.id)}</div><div class="section-label"><span>实体 NBT</span><button id="export-entity-nbt" class="text-button">导出 JSON ↗</button></div><pre class="nbt">${escapeHtml(JSON.stringify(e.nbt,null,2))}</pre><details><summary>原始标签类型</summary><pre class="nbt">${escapeHtml(JSON.stringify(e.nbtTypes,null,2))}</pre></details></div>`;
   $('export-entity-nbt').onclick=()=>saveExport({type:'json',name:`entity_${e.id.replace(':','_')}_${index}`,content:JSON.stringify(e,null,2)});renderEntities();
@@ -161,9 +173,9 @@ function updateReplaceSummary(){
   $('replace-summary').textContent=`将影响 ${num(indices.length)} 个方块${nbt?`，其中 ${num(nbt)} 个带有 NBT`:' '}。${target?'目标：'+label(target.id):'请选择有效的目标方块。'}`;
   $('apply-replace').textContent=`替换 ${num(indices.length)} 个方块`;$('apply-replace').disabled=!target||!indices.length||busy;
 }
-function updateTargetProperties(){const target=targetEntry();$('target-properties').innerHTML=target?Object.entries(target.properties).map(([key,values])=>`<label>${escapeHtml(key)}<select data-target-prop="${escapeHtml(key)}">${values.map(v=>`<option value="${escapeHtml(v)}" ${target.defaults[key]===v?'selected':''}>${escapeHtml(v)}</option>`).join('')}</select></label>`).join(''):'';updateReplaceSummary();}
+function updateTargetProperties(){const target=targetEntry();$('target-properties').innerHTML=target?Object.entries(target.properties).map(([key,values])=>`<label>${escapeHtml(key)}<select data-target-prop="${escapeHtml(key)}">${values.map(v=>`<option data-i18n-skip value="${escapeHtml(v)}" ${target.defaults[key]===v?'selected':''}>${escapeHtml(v)}</option>`).join('')}</select></label>`).join(''):'';updateReplaceSummary();}
 async function openReplace(){
-  if(!data||busy)return;try{catalog=await window.desktop.blockCatalog();$('replace-source').innerHTML='<option value="__selected__">左侧勾选的所有方块种类</option>'+allNames.map(n=>`<option value="${escapeHtml(n)}">${escapeHtml(label(n))} (${num(data.counts.byName[n])})</option>`).join('');$('replace-source').value=selected!=null?stateName(selected):selectedNames.size===1?[...selectedNames][0]:allNames[0];$('replace-scope').value='visible';$('block-catalog').innerHTML=catalog.map(c=>`<option value="${escapeHtml(c.id)}">${escapeHtml(label(c.id))}</option>`).join('');if(!targetEntry())$('replace-target').value='minecraft:stone';$('replace-error').hidden=true;updateTargetProperties();$('replace-dialog').showModal();}catch(e){toast('无法读取方块目录：'+e.message);}
+  if(!data||busy)return;try{catalog=await window.desktop.blockCatalog();$('replace-source').innerHTML='<option value="__selected__">左侧勾选的所有方块种类</option>'+allNames.map(n=>`<option data-i18n-skip value="${escapeHtml(n)}">${escapeHtml(label(n))} (${num(data.counts.byName[n])})</option>`).join('');$('replace-source').value=selected!=null?stateName(selected):selectedNames.size===1?[...selectedNames][0]:allNames[0];$('replace-scope').value='visible';$('block-catalog').innerHTML=catalog.map(c=>`<option data-i18n-skip value="${escapeHtml(c.id)}">${escapeHtml(label(c.id))}</option>`).join('');if(!targetEntry())$('replace-target').value='minecraft:stone';$('replace-error').hidden=true;updateTargetProperties();$('replace-dialog').showModal();}catch(e){toast('无法读取方块目录：'+e.message);}
 }
 async function applyReplacement(){
   const target=targetEntry();if(!target)return;const indices=replacementIndices();if(!indices.length)return;
@@ -200,7 +212,7 @@ $('jump-button').onclick=()=>{if(!data)return;const raw=['x','y','z'].map(a=>$('
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{viewer?.view(b.dataset.view);document.querySelectorAll('[data-view]').forEach(x=>x.classList.toggle('active',x===b));});
 $('zoom-in').onclick=()=>viewer?.zoom(1.3);$('zoom-out').onclick=()=>viewer?.zoom(1/1.3);$('fit').onclick=()=>viewer?.fit();
 $('grid-toggle').onclick=()=>{grid=!grid;viewer?.setGrid(grid);$('grid-toggle').classList.toggle('active',grid);};
-$('screenshot').onclick=()=>{if(!data||!viewer)return;try{saveExport({type:'png',name:'投影视图',content:viewer.capture()});}catch(error){toast('截图失败：'+error.message);}};
+$('screenshot').onclick=()=>{if(!data||!viewer)return;try{saveExport({type:'png',name:t('投影视图'),content:viewer.capture()});}catch(error){toast('截图失败：'+error.message);}};
 $('resources-button').onclick=()=>{updateResourceUI();$('resources-dialog').showModal();};
 $('choose-jar').onclick=()=>changeResources('jar');$('choose-pack').onclick=()=>changeResources('pack');$('clear-pack').onclick=()=>changeResources('clear-pack');
 $('use-detected').onclick=async()=>{const candidate=config.candidates?.[Number($('detected-jars').value)];if(candidate){try{config={...config,...await window.desktop.useResource(candidate.path)};updateResourceUI();}catch(error){toast(error.message);}}};
@@ -208,5 +220,38 @@ $('reload-resources').onclick=()=>{$('resources-dialog').close();if(filePath)per
 document.addEventListener('keydown',e=>{if(e.target.matches('input,textarea,select')||document.querySelector('dialog[open]'))return;const key=e.key.toLowerCase();if(e.ctrlKey||e.metaKey){if(key==='o'){e.preventDefault();openFile();}else if(key==='s'){e.preventDefault();saveSchematic();}else if(key==='z'){e.preventDefault();editHistory(e.shiftKey?'redo':'undo');}else if(key==='y'){e.preventDefault();editHistory('redo');}return;}if(e.key==='+'||e.key==='=')viewer?.zoom(1.3);else if(e.key==='-')viewer?.zoom(1/1.3);else if(key==='f')viewer?.fit();});
 let dragDepth=0;document.addEventListener('dragenter',e=>{e.preventDefault();dragDepth++;$('drop-overlay').hidden=false;});document.addEventListener('dragover',e=>e.preventDefault());document.addEventListener('dragleave',e=>{e.preventDefault();if(--dragDepth<=0){dragDepth=0;$('drop-overlay').hidden=true;}});document.addEventListener('drop',e=>{e.preventDefault();dragDepth=0;$('drop-overlay').hidden=true;const file=e.dataTransfer.files[0];if(!file)return;const path=window.desktop.droppedPath(file);if(!/\.litematic$/i.test(path)){toast('请拖入 .litematic 投影文件');return;}performLoad(()=>window.desktop.loadFile(path));});
 window.desktop.onProgress(text=>{$('loading-text').textContent=text;});
-window.studio=Object.freeze({getState:()=>({data,assets,entityAssets,visible:[...visible],visibleEntities:[...visibleEntities],selected,selectedEntity,filePath,busy,layerMode,document:documentInfo}),viewer});
-(async()=>{try{config=await window.desktop.getConfig();updateResourceUI();if(config.startupFile)await performLoad(()=>window.desktop.loadFile(config.startupFile));}catch(error){toast(error.message);}})();
+function refreshLanguage(){
+  document.documentElement.lang=locale==='en_us'?'en':'zh-CN';
+  $('language-select').value=locale;
+  if(!filePath)$('file-title').textContent=t('打开你的下一项工程');
+  // Only textual views are rebuilt. GPU meshes, camera, filters and selection
+  // identities stay intact, including a replacement dialog in progress.
+  if(data){
+    entityLayer?.setLabels(entityLabel,locale==='en_us'?'Approximate bounds':'近似边界');
+    renderBlocks();renderMaterials();renderContainers();renderEntities();
+    const scroll=$('tab-inspect').scrollTop,openDetails=[...$('inspector').querySelectorAll('details')].map(el=>el.open);
+    if(selected!=null)inspect(selected,false);else if(selectedEntity!=null)inspectEntity(selectedEntity,false);
+    $('inspector').querySelectorAll('details').forEach((el,i)=>{el.open=!!openDetails[i];});$('tab-inspect').scrollTop=scroll;
+  }
+  updateResourceUI();
+  if(catalog.length){
+    const source=$('replace-source').value,target=targetEntry()?.id;
+    $('replace-source').innerHTML='<option value="__selected__">左侧勾选的所有方块种类</option>'+allNames.map(n=>`<option value="${escapeHtml(n)}" data-i18n-skip>${escapeHtml(label(n))} (${num(data.counts.byName[n])})</option>`).join('');
+    $('replace-source').value=source;
+    $('block-catalog').innerHTML=catalog.map(c=>`<option value="${escapeHtml(c.id)}" data-i18n-skip>${escapeHtml(label(c.id))}</option>`).join('');
+    if(target)$('replace-target').value=target;
+    updateReplaceSummary();
+  }
+  localizeTree(document,locale);
+}
+async function setLocale(value){
+  const next=normalizeLocale(value);
+  // Resolve an entered translated name before changing its language.
+  const target=targetEntry();if(target)$('replace-target').value=target.id;
+  try{await window.desktop.setLocale(next);locale=next;config.locale=next;refreshLanguage();}
+  catch(error){$('language-select').value=locale;toast(error.message);}
+}
+$('language-select').onchange=e=>setLocale(e.target.value);
+observeTranslations(document,()=>locale);
+window.studio=Object.freeze({getState:()=>({data,assets,entityAssets,containerAssets,selectedSlot,visible:[...visible],visibleEntities:[...visibleEntities],selected,selectedEntity,filePath,busy,layerMode,locale,document:documentInfo}),viewer,setLocale});
+(async()=>{try{config=await window.desktop.getConfig();locale=normalizeLocale(config.locale);refreshLanguage();if(config.startupFile)await performLoad(()=>window.desktop.loadFile(config.startupFile));}catch(error){toast(error.message);}})();

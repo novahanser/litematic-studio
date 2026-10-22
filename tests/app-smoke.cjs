@@ -85,7 +85,7 @@ async function main(){
   assert.equal(await page.evaluate(()=>window.studio.getState().visible.length),filledCount);checks.push({name:'filled-container filter',count:filledCount});
   if(filledCount){
    await page.locator('[data-tab="containers"]').click();await page.locator('.container-row').first().click();
-   assert.ok(await page.locator('#inspector pre.nbt').first().textContent());assert.ok(await page.locator('.item-row').count()>0);
+   assert.ok(await page.locator('#inspector pre.nbt').first().textContent());assert.ok(await page.locator('.container-board .inventory-item').count()>0);
    const selected=await page.evaluate(()=>{const s=window.studio.getState();return s.data.blocks[s.selected];});assert.equal(selected.container.status,'filled');checks.push({name:'filled containers and NBT inspector',position:[selected.x,selected.y,selected.z],items:selected.container.itemCount});
    await screenshot(app,'02-container-inspector.png');
    stage('NBT JSON export');

@@ -3,15 +3,21 @@ import * as THREE from 'three';
 const EPSILON = 1e-10;
 const finiteVector = value => value && ['x', 'y', 'z'].every(axis => Number.isFinite(value[axis]));
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+// A restored camera can begin outside new limits. Never reverse the requested
+// direction or snap it to the opposite limit; let it return gradually.
+const limitStep = (current, requested, min, max) => requested > current
+  ? Math.min(requested, Math.max(current, max)) : Math.max(requested, Math.min(current, min));
 
-/** Match OrbitControls' wheel sensitivity without its target-distance dolly.
- * A factor greater than one zooms in. Pixel, line and page wheel modes work. */
+/** Blender uses a 1.2x wheel step. Normalize the common 120-pixel notch while
+ * retaining fractional trackpad input and OrbitControls' line/page/pinch units.
+ * A factor greater than one zooms in. Equal total deltas give equal zooms,
+ * regardless of how the browser coalesces the input into wheel events. */
 export function wheelZoomFactor(event, speed = 1, controlPressed = false) {
   if (!Number.isFinite(event?.deltaY) || !Number.isFinite(speed) || speed <= 0) return 1;
   const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? 100 : 1;
   const pinch = event.ctrlKey && !controlPressed ? 10 : 1;
-  const delta = clamp(event.deltaY * unit * pinch * speed, -1000, 1000);
-  return Math.pow(0.95, delta * 0.01);
+  const exponent = -event.deltaY * unit * pinch * speed * Math.log(1.2) / 120;
+  return Math.exp(clamp(exponent, -50, 50));
 }
 
 export function cursorNDC(event, rect) {
@@ -44,6 +50,24 @@ export function resolveCursorAnchor(camera, target, pointer, hitPoint = null) {
   return finiteVector(point) ? { point, source: 'target-plane' } : null;
 }
 
+/** Auto Depth changes only the view-center depth, never the camera pose. This
+ * also makes the next empty-space zoom use the last surface's view plane, rather
+ * than jumping to an unrelated distant orbit center. The target stays on the
+ * view axis so OrbitControls will not turn the camera toward the cursor. */
+export function setOrbitDepthFromAnchor(camera, target, anchor, limits = {}) {
+  if (!camera || !finiteVector(target) || !finiteVector(anchor)) return false;
+  camera.updateMatrixWorld(true);
+  const forward = camera.getWorldDirection(new THREE.Vector3());
+  const depth = anchor.clone().sub(camera.position).dot(forward);
+  if (!Number.isFinite(depth) || depth <= 0) return false;
+  const minDistance = Math.max(1e-6, limits.minDistance ?? 0.2);
+  const maxDistance = Math.max(minDistance, limits.maxDistance ?? 50000);
+  const next = camera.position.clone().addScaledVector(forward, clamp(depth, minDistance, maxDistance));
+  if (next.distanceToSquared(target) < EPSILON * EPSILON) return false;
+  target.copy(next);
+  return true;
+}
+
 /** Zoom about a world-space anchor without changing its screen position.
  * Perspective scales BOTH camera and target about the anchor. Orthographic
  * shifts both by the exact before/after unprojection difference, including
@@ -59,7 +83,7 @@ export function zoomAtAnchor(camera, target, anchor, factor, limits = {}) {
     if (!Number.isFinite(oldZoom) || oldZoom <= 0) return unchanged;
     const minZoom = Math.max(1e-8, limits.minZoom ?? 0.0001);
     const maxZoom = Math.max(minZoom, limits.maxZoom ?? 100000);
-    const zoom = clamp(oldZoom * factor, minZoom, maxZoom);
+    const zoom = limitStep(oldZoom, oldZoom * factor, minZoom, maxZoom);
     if (zoom === oldZoom) return unchanged;
     const projected = anchor.clone().project(camera);
     camera.zoom = zoom; camera.updateProjectionMatrix();
@@ -73,7 +97,7 @@ export function zoomAtAnchor(camera, target, anchor, factor, limits = {}) {
   if (!Number.isFinite(distance) || distance < EPSILON) return unchanged;
   const minDistance = Math.max(1e-6, limits.minDistance ?? 0.2);
   const maxDistance = Math.max(minDistance, limits.maxDistance ?? 50000);
-  let scale = clamp(distance / factor, minDistance, maxDistance) / distance;
+  let scale = limitStep(distance, distance / factor, minDistance, maxDistance) / distance;
   const forward = camera.getWorldDirection(new THREE.Vector3());
   const depth = anchor.clone().sub(camera.position).dot(forward);
   if (!Number.isFinite(depth) || depth <= 0) return unchanged;
@@ -123,11 +147,19 @@ export function attachCursorZoom({ element, getCamera, controls, pick, beforeZoo
       // flushing damping before picking would make the cursor anchor jump first.
       if (beforeZoom) beforeZoom(); else controls.update();
       camera.position.copy(position); camera.quaternion.copy(quaternion); camera.zoom = zoom;
-      controls.target.copy(target); camera.updateProjectionMatrix(); controls.update();
+      controls.target.copy(target); camera.updateProjectionMatrix();
       camera.updateMatrixWorld(true);
+      // OrbitControls clamps the camera itself in update(). If a restored pose
+      // is outside its distance limits, repair the center depth first instead,
+      // so the next update cannot move the camera opposite the wheel direction.
+      const distance = camera.position.distanceTo(controls.target);
+      if (distance < controls.minDistance || distance > controls.maxDistance) {
+        setOrbitDepthFromAnchor(camera, controls.target, controls.target, controls);
+      }
       const hit = pick?.(event);
       const anchor = resolveCursorAnchor(camera, controls.target, pointer, hit?.point || (hit?.isVector3 ? hit : null));
       if (!anchor) return null;
+      if (anchor.source === 'surface') setOrbitDepthFromAnchor(camera, controls.target, anchor.point, controls);
       const result = { ...zoomAtAnchor(camera, controls.target, anchor.point, factor, controls), anchor: anchor.point, source: anchor.source, factor };
       controls.update();
       if (result.changed) invalidate?.(result);
@@ -139,6 +171,7 @@ export function attachCursorZoom({ element, getCamera, controls, pick, beforeZoo
   element.addEventListener('wheel', wheel, { capture: true, passive: false });
   element.addEventListener('pointerdown', pointerDown, true);
   element.addEventListener('pointercancel', pointerUp, true);
+  element.addEventListener('lostpointercapture', pointerUp, true);
   owner.addEventListener('pointerup', pointerUp, true);
   owner.addEventListener('keydown', keyDown, true);
   owner.addEventListener('keyup', keyUp, true);
@@ -151,6 +184,7 @@ export function attachCursorZoom({ element, getCamera, controls, pick, beforeZoo
       element.removeEventListener('wheel', wheel, true);
       element.removeEventListener('pointerdown', pointerDown, true);
       element.removeEventListener('pointercancel', pointerUp, true);
+      element.removeEventListener('lostpointercapture', pointerUp, true);
       owner.removeEventListener('pointerup', pointerUp, true);
       owner.removeEventListener('keydown', keyDown, true);
       owner.removeEventListener('keyup', keyUp, true);

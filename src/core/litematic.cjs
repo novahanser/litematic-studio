@@ -120,45 +120,8 @@ function parseNBT(input) {
   return { name, ...root, compression, bytesRead: offset };
 }
 
-const CONTAINERS = new Set([
-  'chest', 'trapped_chest', 'barrel', 'hopper', 'dispenser', 'dropper', 'furnace',
-  'blast_furnace', 'smoker', 'brewing_stand', 'crafter', 'shulker_box', 'ender_chest',
-  'chiseled_bookshelf', 'decorated_pot', 'campfire', 'soul_campfire', 'jukebox', 'lectern',
-]);
-
-/** Inventory information is a statement about the saved NBT, never a live server inventory. */
-function containerInfo(nbt, blockName = '') {
-  const short = blockName.split(':').pop();
-  const known = CONTAINERS.has(short) || short.endsWith('_shulker_box');
-  const data = nbt && typeof nbt === 'object' ? nbt : null;
-  const components = data?.components;
-  const list = Array.isArray(data?.Items) ? data.Items : Array.isArray(data?.items) ? data.items :
-    Array.isArray(components?.['minecraft:container']) ? components['minecraft:container'] : null;
-  const singleKey = ['Item', 'item', 'RecordItem', 'Book', 'book'].find(key => own(data, key));
-  if (!known && !list && !singleKey && !own(data, 'LootTable') && !own(data, 'loot_table')) return null;
-  const items = [];
-  const rawItems = list || (singleKey ? [data[singleKey]] : []);
-  for (let i = 0; i < rawItems.length; i++) {
-    const wrapper = rawItems[i];
-    if (!wrapper || typeof wrapper !== 'object') continue;
-    const item = wrapper.item && typeof wrapper.item === 'object' ? wrapper.item : wrapper;
-    const id = item.id ?? item.Id ?? '';
-    const count = Number(item.count ?? item.Count ?? (id ? 1 : 0));
-    if (!id || id === 'minecraft:air' || !(count > 0)) continue;
-    items.push({ slot: Number(wrapper.Slot ?? wrapper.slot ?? i), id: String(id), count, nbt: item });
-  }
-  const lootTable = data?.LootTable ?? data?.loot_table ?? null;
-  const hasInventoryField = list !== null || singleKey !== undefined;
-  let status, reason = '';
-  if (items.length) status = 'filled';
-  else if (lootTable) { status = 'loot'; reason = '保存了战利品表，物品尚未生成'; }
-  else if (short === 'ender_chest') { status = 'unknown'; reason = '末影箱物品属于玩家数据，不保存在方块 NBT 中'; }
-  else if (!data) { status = 'unknown'; reason = '投影没有保存此方块的 NBT，无法判断内容'; }
-  else if (hasInventoryField) status = 'empty';
-  else { status = 'unknown'; reason = 'NBT 中没有物品列表，无法确认是否为空'; }
-  return { status, items, itemCount: items.reduce((sum, item) => sum + item.count, 0),
-    occupiedSlots: items.length, lootTable, hasInventoryField, reason };
-}
+/** Inventory information describes saved NBT, never a live server inventory. */
+const { normalizeContainer: containerInfo } = require('./container-layout.cjs');
 
 function vector(value, label) {
   if (!value || ['x', 'y', 'z'].some(axis => !Number.isSafeInteger(value[axis]))) throw new Error(`${label} 坐标无效`);

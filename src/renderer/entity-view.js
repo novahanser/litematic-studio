@@ -44,20 +44,27 @@ function box(parent, size, position, material, uv = null, uvSize = [64, 64]) {
   return mesh;
 }
 
-function labelSprite(label, color = '#f9c977') {
-  if (typeof document === 'undefined') return null;
-  const canvas = document.createElement('canvas');
-  canvas.width = 512; canvas.height = 80;
+function paintLabel(canvas, label, color = '#f9c977') {
   const ctx = canvas.getContext('2d');
-  if (!ctx) return null;
+  if (!ctx) return false;
+  ctx.clearRect(0, 0, 512, 80);
   ctx.fillStyle = 'rgba(13,22,34,0.9)'; ctx.fillRect(0, 0, 512, 80);
   ctx.font = '28px "Microsoft YaHei", sans-serif'; ctx.fillStyle = color;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillText(String(label).slice(0, 65), 256, 40, 494);
+  return true;
+}
+function labelSprite(label, color = '#f9c977') {
+  if (typeof document === 'undefined') return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = 512; canvas.height = 80;
+  if (!paintLabel(canvas, label, color)) return null;
   const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
   const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: texture, depthTest: true, depthWrite: false, transparent: true }));
   sprite.scale.set(2.4, 0.375, 1); sprite.position.y = 1.45;
   sprite.userData.ownedTexture = texture;
+  sprite.userData.labelCanvas = canvas;
+  sprite.userData.labelText = label;
   return sprite;
 }
 
@@ -313,6 +320,23 @@ export class EntityPreviewLayer {
   setVisible(value) {
     if (typeof value === 'boolean') this.setFilter({ enabled: value });
     else this.setFilter({ indices: value == null ? null : value });
+  }
+
+  setLabels(labelForIndex, suffix = '近似边界') {
+    if (this.disposed) return;
+    this.objects.forEach((object, index) => {
+      if (!object) return;
+      const name = labelForIndex(index); object.name = `${name} #${index + 1}`;
+      object.traverse(child => {
+        if (!child.userData.labelCanvas) return;
+        const text = `${name} · ${suffix}`;
+        if (text === child.userData.labelText) return;
+        paintLabel(child.userData.labelCanvas, text);
+        child.userData.labelText = text;
+        child.userData.ownedTexture.needsUpdate = true;
+      });
+    });
+    this.options.onChange?.();
   }
 
   setFilter(patch = {}) {

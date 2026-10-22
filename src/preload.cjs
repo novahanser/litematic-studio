@@ -1,6 +1,7 @@
 const {contextBridge, ipcRenderer, webUtils} = require('electron');
 contextBridge.exposeInMainWorld('desktop', {
   getConfig:()=>ipcRenderer.invoke('get-config'),
+  setLocale:locale=>ipcRenderer.invoke('set-locale',locale),
   openFile:()=>ipcRenderer.invoke('open-file'),
   loadFile:file=>ipcRenderer.invoke('load-file',file),
   reloadCurrent:()=>ipcRenderer.invoke('reload-current'),

@@ -12,10 +12,10 @@ function fixture(THREE, orthographic = false) {
   return { camera, target };
 }
 
-test('wheel deltas retain OrbitControls sensitivity and normalize line/page/pinch modes', async () => {
+test('wheel deltas use Blender-sized steps and normalize continuous line/page/pinch modes', async () => {
   const [{ wheelZoomFactor }] = await imports;
   const input = wheelZoomFactor({ deltaY: -120 });
-  assert.ok(input > 1); close(input * wheelZoomFactor({ deltaY: 120 }), 1);
+  close(input, 1.2); close(input * wheelZoomFactor({ deltaY: 120 }), 1);
   close(wheelZoomFactor({ deltaY: -2, deltaMode: 1 }), wheelZoomFactor({ deltaY: -32 }));
   close(wheelZoomFactor({ deltaY: 2, deltaMode: 2 }), wheelZoomFactor({ deltaY: 200 }));
   close(wheelZoomFactor({ deltaY: -4, ctrlKey: true }), wheelZoomFactor({ deltaY: -40 }));
@@ -23,6 +23,9 @@ test('wheel deltas retain OrbitControls sensitivity and normalize line/page/pinc
   assert.equal(wheelZoomFactor({ deltaY: NaN }), 1);
   assert.equal(wheelZoomFactor({ deltaY: -Infinity }), 1);
   assert.ok(Number.isFinite(wheelZoomFactor({ deltaY: -1e100 })));
+  assert.ok(wheelZoomFactor({ deltaY: 1e100 }) > 0);
+  close(wheelZoomFactor({ deltaY: -2400 }), wheelZoomFactor({ deltaY: -1200 }) ** 2);
+  close(wheelZoomFactor({ deltaY: -120 }), wheelZoomFactor({ deltaY: -1.5 }) ** 80);
 });
 
 test('cursor coordinates use canvas position and CSS dimensions rather than drawing-buffer pixels', async () => {
@@ -45,6 +48,28 @@ test('surface raycast wins over the much farther orbit-target plane', async () =
   sameScreen(fallback.point, { x: pointer.x, y: pointer.y }, camera);
   const behind = camera.position.clone().sub(camera.getWorldDirection(new THREE.Vector3()));
   assert.equal(resolveCursorAnchor(camera, target, pointer, behind).source, 'target-plane');
+});
+
+test('auto depth changes only the orbit-center depth and carries it into empty space', async () => {
+  const [{ setOrbitDepthFromAnchor, resolveCursorAnchor, zoomAtAnchor }, THREE] = await imports;
+  for (const orthographic of [false, true]) {
+    const { camera, target } = fixture(THREE, orthographic);
+    const forward = camera.getWorldDirection(new THREE.Vector3()), position = camera.position.clone(), orientation = camera.quaternion.clone();
+    const pointer = new THREE.Vector2(.7, -.4), raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(pointer, camera);
+    const surface = raycaster.ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(forward, position.clone().addScaledVector(forward, 2)), new THREE.Vector3());
+    assert.ok(camera.position.distanceTo(target) > 20);
+    assert.equal(setOrbitDepthFromAnchor(camera, target, surface), true);
+    close(camera.position.distanceTo(target), 2); close(camera.position.distanceTo(position), 0);
+    assert.deepEqual(camera.quaternion.toArray(), orientation.toArray()); sameScreen(surface, pointer, camera);
+    zoomAtAnchor(camera, target, surface, 1.2);
+    const empty = resolveCursorAnchor(camera, target, pointer);
+    close(empty.point.distanceTo(surface), 0);
+    const movedPointer = new THREE.Vector2(-.75, .6), moved = resolveCursorAnchor(camera, target, movedPointer);
+    sameScreen(moved.point, movedPointer, camera);
+    close(moved.point.clone().sub(camera.position).dot(forward), surface.clone().sub(camera.position).dot(forward));
+    assert.equal(setOrbitDepthFromAnchor(camera, target, position.clone().addScaledVector(forward, -100)), false);
+  }
 });
 
 test('perspective zoom keeps a near surface under an off-centre cursor without stepping through it', async () => {
@@ -111,6 +136,28 @@ test('distance clamps do not shift the perspective anchor and invalid factors ar
   for (const factor of [0, -1, NaN, Infinity]) assert.equal(zoomAtAnchor(camera, target, anchor, factor, limits).changed, false);
 });
 
+test('limits never reverse zoom direction when a restored camera starts outside them', async () => {
+  const [{ resolveCursorAnchor, zoomAtAnchor }, THREE] = await imports;
+  for (const start of [1, 80]) {
+    const { camera, target } = fixture(THREE);
+    camera.position.sub(target).setLength(start).add(target); camera.updateMatrixWorld(true);
+    const anchor = resolveCursorAnchor(camera, target, new THREE.Vector2(.5, .2)).point;
+    const blocked = start < 2 ? 1.1 : 1 / 1.1, towardRange = 1 / blocked;
+    assert.equal(zoomAtAnchor(camera, target, anchor, blocked, { minDistance: 2, maxDistance: 40 }).changed, false);
+    zoomAtAnchor(camera, target, anchor, towardRange, { minDistance: 2, maxDistance: 40 });
+    close(camera.position.distanceTo(target), start / towardRange);
+  }
+  for (const start of [.1, 16]) {
+    const { camera, target } = fixture(THREE, true);
+    camera.zoom = start; camera.updateProjectionMatrix();
+    const anchor = resolveCursorAnchor(camera, target, new THREE.Vector2(.5, .2)).point;
+    const blocked = start < .25 ? 1 / 1.1 : 1.1, towardRange = 1 / blocked;
+    assert.equal(zoomAtAnchor(camera, target, anchor, blocked, { minZoom: .25, maxZoom: 8 }).changed, false);
+    zoomAtAnchor(camera, target, anchor, towardRange, { minZoom: .25, maxZoom: 8 });
+    close(camera.zoom, start * towardRange);
+  }
+});
+
 class FakeElement {
   constructor() { this.listeners = new Map(); this.ownerDocument = this; this.modal = false; }
   addEventListener(name, fn) { if (!this.listeners.has(name)) this.listeners.set(name, new Set()); this.listeners.get(name).add(fn); }
@@ -139,8 +186,72 @@ test('wheel adapter cancels residual damping without an anchor jump, preserves M
   current = fixture(THREE, true).camera; controls.object = current;
   const oldZoom = current.zoom; attachment.handleWheel(event); assert.ok(current.zoom > oldZoom);
   element.emit('pointerdown', { pointerId: 7 }); assert.equal(attachment.handleWheel(event), null);
-  element.emit('pointerup', { pointerId: 7 }); element.modal = true; assert.equal(attachment.handleWheel(event), null);
+  element.emit('lostpointercapture', { pointerId: 7 }); assert.ok(attachment.handleWheel(event));
+  element.modal = true; assert.equal(attachment.handleWheel(event), null);
   element.modal = false; controls.enableZoom = false; assert.equal(attachment.handleWheel(event), null);
   controls.enableZoom = true; attachment.dispose(); attachment.dispose(); assert.equal(attachment.handleWheel(event), null);
   assert.ok([...element.listeners.values()].every(listeners => listeners.size === 0));
+});
+
+test('real OrbitControls keeps a near-surface depth through blank pixels without accumulated drift', async () => {
+  const [{ attachCursorZoom, cursorNDC }, THREE, { OrbitControls }] = await imports;
+  for (const orthographic of [false, true]) {
+    const { camera, target } = fixture(THREE, orthographic), controls = new OrbitControls(camera), element = new FakeElement();
+    controls.target.copy(target); controls.update(); controls.enableDamping = true;
+    controls.minDistance = .2; controls.maxDistance = 50000; controls.minZoom = .0001; controls.maxZoom = 100000;
+    const event = { clientX: 620, clientY: 200, deltaY: -120 }, pointer = cursorNDC(event, element.getBoundingClientRect());
+    const forward = camera.getWorldDirection(new THREE.Vector3()), raycaster = new THREE.Raycaster();
+    raycaster.setFromCamera(pointer, camera);
+    const surface = raycaster.ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(forward, camera.position.clone().addScaledVector(forward, 2)), new THREE.Vector3());
+    let hit = surface;
+    const attachment = attachCursorZoom({ element, controls, getCamera: () => camera, pick: () => hit && ({ point: hit }) });
+    attachment.handleWheel(event); controls.update(); sameScreen(surface, pointer, camera);
+    close(camera.position.distanceTo(controls.target), orthographic ? 2 : 2 / 1.2);
+    const originalPosition = camera.position.clone(), originalTarget = controls.target.clone(), zoom = camera.zoom;
+    hit = null; // An alpha hole or adjacent empty pixel must not restore the old far target.
+    for (let i = 0; i < 200; i++) {
+      const out = attachment.handleWheel({ ...event, deltaY: 1.5 });
+      close(out.anchor.distanceTo(surface), 0); sameScreen(surface, pointer, camera);
+      const back = attachment.handleWheel({ ...event, deltaY: -1.5 });
+      close(back.anchor.distanceTo(surface), 0); sameScreen(surface, pointer, camera);
+      controls.update();
+    }
+    close(camera.position.distanceTo(originalPosition), 0); close(controls.target.distanceTo(originalTarget), 0); close(camera.zoom, zoom);
+    attachment.dispose();
+  }
+});
+
+test('coalesced and fractional wheel gestures produce the same camera and target in both projections', async () => {
+  const [{ attachCursorZoom }, THREE, { OrbitControls }] = await imports;
+  for (const orthographic of [false, true]) {
+    const run = deltas => {
+      const { camera, target } = fixture(THREE, orthographic), controls = new OrbitControls(camera), element = new FakeElement();
+      controls.target.copy(target); controls.update();
+      const attachment = attachCursorZoom({ element, controls, getCamera: () => camera });
+      for (const deltaY of deltas) attachment.handleWheel({ clientX: 620, clientY: 200, deltaY });
+      attachment.dispose(); return { position: camera.position, target: controls.target, zoom: camera.zoom };
+    };
+    const whole = run([-240]), fractional = run(Array(160).fill(-1.5));
+    close(whole.position.distanceTo(fractional.position), 0); close(whole.target.distanceTo(fractional.target), 0); close(whole.zoom, fractional.zoom);
+  }
+});
+
+test('repeated real wheel input at minimum and maximum limits stays still and reverses immediately', async () => {
+  const [{ attachCursorZoom, cursorNDC, resolveCursorAnchor }, THREE, { OrbitControls }] = await imports;
+  for (const orthographic of [false, true]) {
+    const { camera, target } = fixture(THREE, orthographic), controls = new OrbitControls(camera), element = new FakeElement();
+    controls.target.copy(target); controls.minDistance = 2; controls.maxDistance = 40; controls.minZoom = .25; controls.maxZoom = 8; controls.update();
+    const event = { clientX: 620, clientY: 200 }, pointer = cursorNDC(event, element.getBoundingClientRect());
+    const attachment = attachCursorZoom({ element, controls, getCamera: () => camera });
+    for (const direction of [-1, 1]) {
+      attachment.handleWheel({ ...event, deltaY: 20000 * direction });
+      const position = camera.position.clone(), center = controls.target.clone(), zoom = camera.zoom;
+      const anchor = resolveCursorAnchor(camera, controls.target, pointer).point;
+      for (let i = 0; i < 40; i++) { attachment.handleWheel({ ...event, deltaY: 120 * direction }); controls.update(); }
+      close(camera.position.distanceTo(position), 0); close(controls.target.distanceTo(center), 0); close(camera.zoom, zoom); sameScreen(anchor, pointer, camera);
+      const back = attachment.handleWheel({ ...event, deltaY: -1.5 * direction });
+      assert.ok(back.changed); sameScreen(anchor, pointer, camera);
+    }
+    attachment.dispose();
+  }
 });

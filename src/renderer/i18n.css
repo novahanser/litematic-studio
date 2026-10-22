@@ -1,0 +1,8 @@
+#language-select{width:92px;flex:0 0 92px;font-size:12px;padding:7px 6px}
+html[lang="en"] .topbar{gap:8px}
+html[lang="en"] .topbar button{white-space:nowrap;padding-left:10px;padding-right:10px}
+html[lang="en"] .selection-actions{flex-wrap:wrap;gap:6px}
+html[lang="en"] .selection-actions span{width:100%;margin-left:0}
+html[lang="en"] .view-presets{flex-wrap:wrap;justify-content:flex-end}
+html[lang="en"] .navigation-table>div{gap:16px}
+html[lang="en"] .tabs button{font-size:12px;padding-left:8px;padding-right:8px}

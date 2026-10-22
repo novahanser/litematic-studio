@@ -183,7 +183,7 @@ function imageFromURI(uri) {
   });
 }
 
-async function createAtlas(assets, limit) {
+export async function createAtlas(assets, limit) {
   const entries = Object.entries(assets.textures || {});
   const loaded = await Promise.all(entries.map(async ([id, uri]) => ({ id, image: await imageFromURI(typeof uri === 'string' ? uri : uri.dataURI), meta: assets.textureMeta?.[id] || {} })));
   const tiles = loaded.filter(v => v.image).map(v => ({ ...v, width: Math.max(1, Math.min(v.image.width, v.meta.frameWidth || v.image.width)), height: Math.max(1, Math.min(v.image.height, v.meta.frameHeight || (v.meta.animated ? v.image.width : v.image.height))) }));
