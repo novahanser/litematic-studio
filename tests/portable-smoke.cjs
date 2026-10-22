@@ -104,6 +104,20 @@ async function main() {
     assert.match(snapshot.rendererUrl, /app\.asar\/build\/index\.html/);
     assert.deepEqual(rendererErrors, []);
     report.checks.push({ name: 'Portable wrapper launches its packaged ASAR and worker, loads user sample and local game textures', passed: true, ...snapshot });
+    // A release may be built on another Windows host. Check the actual ASAR
+    // unpacked by this exact EXE; tolerate only Git's CRLF/LF conversion.
+    const { fileURLToPath } = require('node:url'), asar = await import('@electron/asar');
+    const archive = fileURLToPath(snapshot.rendererUrl).replace(/[\\/]build[\\/]index\.html$/, '');
+    const sourcePaths = ['src/main.cjs', 'src/preload.cjs', ...fs.readdirSync(path.join(root, 'src/core')).filter(name => name.endsWith('.cjs')).map(name => 'src/core/' + name),
+      'build/app.js', 'build/app.css', 'build/index.html', 'build/style.css'];
+    for (const filename of sourcePaths) {
+      const expectedText = fs.readFileSync(path.join(root, filename), 'utf8').replace(/\r\n/g, '\n');
+      const actualText = asar.extractFile(archive, filename.split('/').join(path.sep)).toString('utf8').replace(/\r\n/g, '\n');
+      assert.equal(actualText, expectedText, filename + ' differs from tested source');
+    }
+    assert.equal(JSON.parse(asar.extractFile(archive, 'package.json')).version, require('../package.json').version);
+    assert.ok(!asar.listPackage(archive).some(filename => /\.(?:litematic|jar|zip)$|test-results|settings\.json/.test(filename)));
+    report.checks.push({ name: 'Exact EXE contains the tested application source and no bundled game or private inputs', passed: true, files: sourcePaths });
     const png = await page.evaluate(() => window.studio.viewer.capture());
     assert.match(png, /^data:image\/png;base64,/);
     const pngBytes = Buffer.from(png.substring(png.indexOf(',') + 1), 'base64');

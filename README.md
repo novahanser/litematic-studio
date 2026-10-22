@@ -70,6 +70,6 @@ npm run dist
 
 可选集成测试通过 `MINECRAFT_JAR` 和 `LITEMATIC_SAMPLE` 指定本地资源；未提供时相关测试明确跳过。桌面检查使用 `test:app`、`test:edit`、`test:renderer`、`test:display`、`test:materials`、`test:containers`、`test:language`、`test:cursor`；打包后运行 `test:portable`。测试产物位于 Git 忽略的 `test-results/`。
 
-全量方块检查的方法、1.3.0 历史结果与覆盖边界见 [方块审计](docs/BLOCK-AUDIT-1.3.0.md)。CI 执行核心测试与构建，不代替桌面和 EXE 验收。
+全量方块检查的方法、1.3.0 历史结果与覆盖边界见 [方块审计](docs/BLOCK-AUDIT-1.3.0.md)。CI 执行核心测试与构建；手动发布工作流只上传到已有草稿，公开前仍需桌面和 EXE 验收。
 
 [MIT 许可](LICENSE) · [第三方声明](THIRD_PARTY_NOTICES.txt) · [初始项目选型](docs/OPEN-SOURCE-REVIEW.md)

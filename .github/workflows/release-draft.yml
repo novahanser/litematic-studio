@@ -1,0 +1,106 @@
+name: Build assets for an existing draft release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing draft release tag, matching v<package version>
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-draft-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  draft-assets:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Validate requested version
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
+            throw 'package.json must contain a valid release version.'
+          }
+          if ($env:RELEASE_TAG -cne "v$version") {
+            throw 'The requested tag must exactly equal v<package.json version>.'
+          }
+          Write-Output "Building $env:RELEASE_TAG from $env:GITHUB_SHA"
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run synthetic-fixture and geometry tests
+        run: npm test
+
+      - name: Build portable executable without publishing
+        run: npm run dist -- --publish never
+
+      - name: Upload to the existing draft without replacing assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content -LiteralPath package.json -Raw | ConvertFrom-Json).version
+          if ($env:RELEASE_TAG -cne "v$version") { throw 'Release version changed during the build.' }
+          $exeName = "Litematic-Studio-$version-win-x64.exe"
+          $binary = Join-Path $env:GITHUB_WORKSPACE "dist/$exeName"
+          $checksum = Join-Path $env:GITHUB_WORKSPACE 'dist/SHA256SUMS.txt'
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Expected portable executable was not built.' }
+          $hash = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath $checksum -Value "$hash  $exeName`n" -Encoding ascii -NoNewline
+
+          $releaseJson = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft,tagName,assets,url
+          if ($LASTEXITCODE -ne 0) { throw 'The existing draft release could not be read.' }
+          $release = $releaseJson | ConvertFrom-Json
+          if ($release.tagName -cne $env:RELEASE_TAG -or -not $release.isDraft) {
+            throw 'The requested release must already exist and remain a draft.'
+          }
+          $names = @($release.assets | ForEach-Object { $_.name })
+          foreach ($name in @($exeName, 'SHA256SUMS.txt')) {
+            if ($names -contains $name) { throw "Asset already exists; refusing to replace: $name" }
+          }
+
+          gh release upload $env:RELEASE_TAG $binary $checksum --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -ne 0) { throw 'Draft asset upload failed. Inspect existing assets before retrying.' }
+          $verifiedJson = gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --json isDraft,tagName,assets,url
+          if ($LASTEXITCODE -ne 0) { throw 'Could not verify uploaded draft assets.' }
+          $verified = $verifiedJson | ConvertFrom-Json
+          if (-not $verified.isDraft -or $verified.tagName -cne $env:RELEASE_TAG) {
+            throw 'The release is no longer the expected draft.'
+          }
+          foreach ($file in @($binary, $checksum)) {
+            $info = Get-Item -LiteralPath $file
+            $asset = @($verified.assets | Where-Object { $_.name -ceq $info.Name })
+            if ($asset.Count -ne 1 -or $asset[0].size -ne $info.Length) {
+              throw "Uploaded asset is missing or has an unexpected size: $($info.Name)"
+            }
+          }
+          @(
+            '### Draft assets uploaded',
+            "Tag: $env:RELEASE_TAG",
+            "Source commit: $env:GITHUB_SHA",
+            "SHA-256: $hash",
+            'The release remains a draft. Download and verify this cloud-built executable locally before publishing.'
+          ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
